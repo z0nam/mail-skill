@@ -1,0 +1,15 @@
+{
+  "name": "mail-skill",
+  "owner": {
+    "name": "z0nam",
+    "url": "https://github.com/z0nam"
+  },
+  "description": "AI mail skill — search/read/draft across Gmail, IMAP, and local archives (Himalaya-backed).",
+  "plugins": [
+    {
+      "name": "mail-skill",
+      "source": "./plugins/mail-skill",
+      "description": "Search, read, and draft replies across many mail accounts for an AI agent. Engine-neutral adapter (Himalaya backend), age-encrypted secrets, local-archive conversion."
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "name": "mail-skill",
+  "displayName": "Mail Skill",
+  "version": "0.1.0",
+  "description": "Search, read, and draft replies across Gmail, IMAP, and local mail archives for an AI agent. Engine-neutral adapter (currently Himalaya), age-encrypted secrets, multi-account routing.",
+  "author": {
+    "name": "z0nam",
+    "url": "https://github.com/z0nam"
+  },
+  "homepage": "https://github.com/z0nam/mail-skill",
+  "repository": "https://github.com/z0nam/mail-skill",
+  "license": "MIT",
+  "keywords": ["mail", "email", "gmail", "imap", "himalaya", "maildir"]
+}
