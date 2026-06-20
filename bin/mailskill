@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# mail — 엔진 중립 어댑터. 스킬/에이전트가 호출하는 "안정적 계약".
+# 현재 백엔드: Himalaya. 더 나은 도구로 갈아타면 이 파일 하나만 다시 구현하면 됨.
+#
+#   mail accounts                     계정 목록 (JSON)
+#   mail folders <acct>               폴더 목록 (JSON)
+#   mail list    <acct> [n]           최근 n통 (JSON, 기본 20)
+#   mail search  <acct> <query...>    IMAP 쿼리 검색 (JSON)
+#   mail read    <acct> <id> [folder] 메시지 읽기 (JSON)
+#   mail reply   <acct> <id>          회신(초안) — 발송 전 사용자 승인 필수
+set -euo pipefail
+H="${HIMALAYA_BIN:-himalaya}"
+cmd="${1:-}"; shift || true
+case "$cmd" in
+  accounts) "$H" account list -o json ;;
+  folders)  "$H" folder list -a "${1:?account}" -o json ;;
+  list)     "$H" envelope list -a "${1:?account}" --page-size "${2:-20}" -o json ;;
+  search)   acct="${1:?account}"; shift; "$H" envelope list -a "$acct" -o json -- "$@" ;;
+  read)     "$H" message read "${2:?id}" -a "${1:?account}" ${3:+-f "$3"} -o json ;;
+  reply)    "$H" message reply "${2:?id}" -a "${1:?account}" ;;
+  doctor)   "$H" account doctor "${1:?account}" ;;
+  *) echo "usage: mail {accounts|folders|list|search|read|reply|doctor} ..." >&2; exit 2 ;;
+esac

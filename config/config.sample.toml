@@ -1,0 +1,42 @@
+# Himalaya config 템플릿 — mail-skill
+#
+# 실제 설정은 config/config.toml 로 복사해 채운 뒤 ~/.config/himalaya/config.toml 로 심링크.
+# 시크릿은 평문 금지: auth.cmd = "mail-secret <name>" 로 age 암호화 파일에서 읽는다.
+#   1) 비번 등록:  scripts/secret-set <name>   (또는  ... | scripts/secret-set <name> --stdin)
+#   2) auth.cmd 의 <name> 을 등록한 키와 일치.
+#
+# himalaya v1.x 키 구조, 출력은 `-o json`, `-a <account>` 는 서브커맨드 뒤.
+# 일부 제공사(WorksMobile/Naver 등)는 IMAP/SMTP 앱비번이 따로일 수 있음 → 키 2개로 분리.
+
+[accounts.example-gmail]
+default = true
+email = "you@example.com"
+display-name = "You (Gmail)"
+backend.type = "imap"
+backend.host = "imap.gmail.com"
+backend.port = 993
+backend.encryption.type = "tls"
+backend.login = "you@example.com"
+backend.auth.type = "password"
+backend.auth.cmd = "mail-secret himalaya-example-gmail"
+message.send.backend.type = "smtp"
+message.send.backend.host = "smtp.gmail.com"
+message.send.backend.port = 465
+message.send.backend.encryption.type = "tls"
+message.send.backend.login = "you@example.com"
+message.send.backend.auth.type = "password"
+message.send.backend.auth.cmd = "mail-secret himalaya-example-gmail"
+
+# 로컬 변환 아카이브(읽기 전용, 비번 불필요) — Maildir 백엔드 예시:
+# [accounts.archive]
+# email = "you@example.com"
+# backend.type = "maildir"
+# backend.root-dir = "/path/to/archive/Maildir"
+# folder.aliases.inbox = ""
+
+# ── 제공사 호스트 프리셋 ───────────────────────────────────────────────
+#   Gmail/Workspace : imap.gmail.com:993 tls / smtp.gmail.com:465 tls  (앱비번 필요, 2FA)
+#   Naver           : imap.naver.com:993 tls / smtp.naver.com:587 start-tls  (IMAP 켜기+앱비번)
+#   Kakao(Daum)     : imap.kakao.com:993 tls / smtp.kakao.com:465 tls
+#   iCloud          : imap.mail.me.com:993 tls / smtp.mail.me.com:587 start-tls  (앱전용 암호)
+#   WorksMobile     : imap.worksmobile.com:993 tls / smtp.worksmobile.com:587 start-tls

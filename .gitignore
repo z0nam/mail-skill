@@ -1,0 +1,22 @@
+# age 개인키 — 절대 커밋 금지 (정상 위치는 ~/.config/mail-mcp/, 레포 밖)
+age-key.txt
+*age-key*
+*.key
+
+# 평문 시크릿 — 금지
+.env
+*.env
+*.secret
+*.local.toml
+*.plain
+
+# OS / 에디터
+.DS_Store
+*.swp
+
+# ── 커밋되는 것(주의): config/config.toml(비번 없음, mail-secret 참조),
+#    secrets/secrets.age(age 암호화), secrets/recipients.txt(공개키) — 모두 안전.
+
+# 개인 계정 매핑(로컬 전용, 절대 커밋 금지)
+accounts.local.json
+*.local.json

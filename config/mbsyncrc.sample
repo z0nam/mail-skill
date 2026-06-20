@@ -1,0 +1,27 @@
+# mbsync (isync) 템플릿 — 보존용 읽기 전용 미러 (선택).
+# 실행:  mbsync -c <this> -a       /  비번은 PassCmd 가 age 에서 읽음(평문 없음).
+# 안전: Sync Pull + Expunge None → 원격에 절대 쓰지 않음(원격→로컬 복사만).
+
+IMAPAccount example
+Host imap.gmail.com
+User you@example.com
+PassCmd "mail-secret himalaya-example-imap"
+TLSType IMAPS
+AuthMechs LOGIN
+
+IMAPStore example-remote
+Account example
+
+MaildirStore example-local
+Path /path/to/archive/example/
+Inbox /path/to/archive/example/INBOX
+SubFolders Verbatim
+
+Channel example
+Far :example-remote:
+Near :example-local:
+Patterns "[Gmail]/All Mail"
+Create Near
+Sync Pull
+Expunge None
+SyncState *
