@@ -29,6 +29,8 @@ mailskill reply  <acct> <id>            # 회신 초안
 1. 대상 메시지를 `read`로 파악.
 2. 회신 초안(받는사람/제목/본문)을 **사용자에게 보여준다**.
 3. **명시적 승인 후에만** 전송. 승인 없이는 절대 보내지 않는다. (connector는 `create_draft`로 초안만.)
+4. `mailskill reply`는 실제 발송으로 이어지는 대화형 명령이다. 승인 후에만 해당 프로세스에
+   `MAIL_SKILL_ALLOW_INTERACTIVE_REPLY=1`을 설정해 실행하고, 승인 범위를 다른 메시지에 재사용하지 않는다.
 
 ## 시크릿 (age, 선택적 멀티머신)
 비번은 `secrets/secrets.age`(age 암호화)에 있고 `auth.cmd = "mail-secret <name>"`가 복호화 공급. 기계별 키 `~/.config/mail-skill/age-key.txt`. macOS/Linux 공통. 디버그: `mail-secret <name>`.
@@ -36,4 +38,5 @@ mailskill reply  <acct> <id>            # 회신 초안
 ## 트러블슈팅
 - 연결/인증: `mailskill doctor <acct>`.
 - 비번 조회 실패: `mail-secret <name>` 값 확인 → `scripts/secret-set <name>` 재등록.
-- 새 기계: `scripts/bootstrap.sh`.
+- 새 macOS/Linux 기계: `scripts/bootstrap.sh`.
+- 새 Windows 기계: PowerShell에서 `scripts/bootstrap.ps1`.

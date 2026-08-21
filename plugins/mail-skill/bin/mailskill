@@ -17,7 +17,11 @@ case "$cmd" in
   list)     "$H" envelope list -a "${1:?account}" --page-size "${2:-20}" -o json ;;
   search)   acct="${1:?account}"; shift; "$H" envelope list -a "$acct" -o json -- "$@" ;;
   read)     "$H" message read "${2:?id}" -a "${1:?account}" ${3:+-f "$3"} -o json ;;
-  reply)    "$H" message reply "${2:?id}" -a "${1:?account}" ;;
+  reply)    [ "${MAIL_SKILL_ALLOW_INTERACTIVE_REPLY:-}" = 1 ] || {
+              echo "reply is interactive and may send mail; explicit approval required" >&2
+              exit 4
+            }
+            "$H" message reply "${2:?id}" -a "${1:?account}" ;;
   doctor)   "$H" account doctor "${1:?account}" ;;
   *) echo "usage: mail {accounts|folders|list|search|read|reply|doctor} ..." >&2; exit 2 ;;
 esac

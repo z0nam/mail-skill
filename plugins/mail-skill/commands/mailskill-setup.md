@@ -4,7 +4,20 @@ description: Set up mail-skill — check deps (himalaya, age), install CLIs to P
 
 # mail-skill 셋업
 
-사용자가 이 명령을 호출하면 아래를 **순서대로, 한 단계씩 확인하며** 진행한다. 각 단계는 사용자 환경(macOS/Linux)에 맞춰 안내한다. `${CLAUDE_PLUGIN_ROOT}` 는 설치된 플러그인 경로다.
+사용자가 이 명령을 호출하면 아래를 **순서대로, 한 단계씩 확인하며** 진행한다. 운영체제에 맞는 절차만 사용한다. `${CLAUDE_PLUGIN_ROOT}` 는 설치된 플러그인 경로다.
+
+## Windows (PowerShell 7)
+
+Windows에서는 아래 흐름을 사용하고 macOS/Linux 절차는 건너뛴다.
+
+1. `pwsh -NoProfile -File "${CLAUDE_PLUGIN_ROOT}/scripts/check-deps.ps1"`로 의존성을 확인한다.
+2. 누락 시 `scoop install himalaya age`를 안내하고, 설치 후 다시 확인한다.
+3. `pwsh -NoProfile -File "${CLAUDE_PLUGIN_ROOT}/scripts/bootstrap.ps1" -AddToUserPath`를 실행한다.
+4. 사용자가 `~/.config/himalaya/config.toml`의 계정 블록을 채우게 한다.
+5. 사용자가 직접 `mail-secret-set himalaya-<name>`을 실행해 앱 비밀번호를 숨김 입력하게 한다.
+6. 새 터미널에서 `mailskill accounts`, `mailskill list <account> 5`로 확인한다.
+
+앱 비밀번호를 대화나 명령 인자로 받지 않는다. `mail-secret-set`의 보안 프롬프트에서만 입력한다.
 
 ## 1) 의존성 점검
 ```sh

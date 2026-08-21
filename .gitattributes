@@ -1,0 +1,7 @@
+*.sh text eol=lf
+plugins/mail-skill/bin/mailskill text eol=lf
+plugins/mail-skill/scripts/mail-secret text eol=lf
+plugins/mail-skill/scripts/secret-edit text eol=lf
+plugins/mail-skill/scripts/secret-set text eol=lf
+*.ps1 text eol=crlf
+*.cmd text eol=crlf

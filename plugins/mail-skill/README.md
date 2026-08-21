@@ -10,9 +10,28 @@
 ```
 `mailskill-setup` 이 의존성(himalaya, age) 확인 → CLI를 PATH에 연결 → age 키 생성 → Himalaya 설정 뼈대 → 계정 비번 등록까지 안내합니다. (수동 설치는 아래 참고)
 
+### Windows (PowerShell 7)
+
+먼저 공식 패키지로 의존성을 설치합니다.
+
+```powershell
+scoop install himalaya age
+```
+
+그다음 플러그인 루트에서 셋업을 실행합니다.
+
+```powershell
+pwsh -NoProfile -File .\scripts\bootstrap.ps1 -AddToUserPath
+mail-secret-set himalaya-example-gmail
+mailskill accounts
+```
+
+새 PATH는 다음 터미널부터 적용됩니다.
+
 ## 의존성
 - [`himalaya`](https://github.com/pimalaya/himalaya) (메일 엔진) · [`age`](https://age-encryption.org) (시크릿 암호화)
 - macOS: `brew install himalaya age`  ·  Linux: 패키지매니저 또는 `cargo install`
+- Windows: `scoop install himalaya age` (또는 age는 `winget install --id FiloSottile.age`)
 
 ## 사용 (어댑터 계약)
 ```sh

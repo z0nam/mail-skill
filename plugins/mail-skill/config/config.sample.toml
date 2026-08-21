@@ -2,6 +2,7 @@
 #
 # 실제 설정은 config/config.toml 로 복사해 채운 뒤 ~/.config/himalaya/config.toml 로 심링크.
 # 시크릿은 평문 금지: auth.cmd = "mail-secret <name>" 로 age 암호화 파일에서 읽는다.
+# Windows에서도 bootstrap.ps1이 mail-secret.cmd를 PATH에 추가하므로 같은 명령을 사용한다.
 #   1) 비번 등록:  scripts/secret-set <name>   (또는  ... | scripts/secret-set <name> --stdin)
 #   2) auth.cmd 의 <name> 을 등록한 키와 일치.
 #

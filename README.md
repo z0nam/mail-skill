@@ -32,6 +32,16 @@ mailskill accounts                            # 동작 확인
 ```
 리눅스는 `age`/`himalaya`를 패키지매니저/`cargo`로 설치하고 `~/.local/bin`이 PATH에 있는지 확인.
 
+Windows(PowerShell 7)는 다음처럼 설치한다.
+
+```powershell
+scoop install himalaya age
+pwsh -NoProfile -File .\plugins\mail-skill\scripts\bootstrap.ps1 -AddToUserPath
+```
+
+Windows용 어댑터와 시크릿 도구는 각각 `bin/mailskill.ps1`, `scripts/mail-secret.ps1`,
+`scripts/secret-set.ps1`이며 셋업이 `%USERPROFILE%\.config\mail-skill\bin`에 실행용 `.cmd` 파일을 만든다.
+
 ## 어댑터 계약
 ```sh
 mailskill accounts                     # 계정 목록(JSON)
