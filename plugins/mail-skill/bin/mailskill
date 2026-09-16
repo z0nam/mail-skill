@@ -8,15 +8,131 @@
 #   mail search  <acct> <query...>    IMAP 쿼리 검색 (JSON)
 #   mail read    <acct> <id> [folder] 메시지 읽기 (JSON)
 #   mail reply   <acct> <id>          회신(초안) — 발송 전 사용자 승인 필수
+#   mail doctor  <acct>               백엔드/계정 상태 점검
+#
+# stdout 계약: JSON 을 내는 동사(accounts/folders/list/search/read)는 **stdout 에 JSON 만**
+# 내보낸다. 진단·경고·에러는 전부 stderr. 호출측이 두 스트림을 합쳐 받아도(에이전트의
+# Bash 도구가 그렇다) 파싱이 깨지지 않아야 하므로, 백엔드 로그는 애초에 끈다.
+#   디버깅: MAILSKILL_LOG=debug mailskill list <acct>   (stderr 로만 나감)
 set -euo pipefail
 H="${HIMALAYA_BIN:-himalaya}"
+export RUST_LOG="${MAILSKILL_LOG:-off}"   # himalaya(tracing) 로그 억제. 에러/exit code 는 유지됨.
+
+# 이 스크립트는 보통 PATH 심링크(/opt/homebrew/bin/mailskill)로 불린다.
+# 저장소의 scripts/ 를 찾으려면 심링크를 끝까지 따라가 실제 위치를 알아내야 한다.
+self="${BASH_SOURCE[0]}"
+while [[ -L "$self" ]]; do
+  target="$(readlink "$self")"
+  [[ "$target" == /* ]] && self="$target" || self="$(dirname "$self")/$target"
+done
+REPO="$(cd "$(dirname "$self")/.." && pwd)"
+
+# json_verb <backend cmd...> — JSON 동사 공통 래퍼.
+# stdout 은 JSON 으로 확인된 경우에만 통과시킨다. 백엔드가 실패를 stderr 로만 알리고
+# exit 0 을 내는 경우(himalaya v1.2.0 의 쿼리 파스 에러가 그렇다)를 여기서 잡아
+# 비정상 종료로 승격한다. 그러지 않으면 호출측은 "빈 결과"와 "깨진 호출"을 구분 못한다.
+json_verb() {
+  local out rc=0 err
+  err="$(mktemp)"
+  out="$("$@" 2>"$err")" || rc=$?
+  if [[ $rc -ne 0 ]]; then
+    # himalaya 는 결과가 0건일 때 "page N out of bounds" 로 죽는다. 이건 실패가 아니라
+    # 빈 결과다 — 그대로 두면 호출측이 멀쩡한 계정을 "조회 실패"로 표시한다.
+    if grep -q "out of bounds" "$err"; then
+      rm -f "$err"; printf '[]\n'; return 0
+    fi
+    cat "$err" >&2; rm -f "$err"
+    echo "mailskill: backend failed (exit $rc): $*" >&2
+    return "$rc"
+  fi
+  # 성공 경로에서는 백엔드 stderr 를 삼킨다. 합쳐진 스트림으로 받는 호출측의
+  # 파싱을 깨지 않기 위함 — 진단이 필요하면 MAILSKILL_LOG 로 켠다.
+  [[ -n "${MAILSKILL_LOG:-}" ]] && cat "$err" >&2
+  rm -f "$err"
+  # 앞쪽 공백을 걷어낸 첫 글자가 '[' 또는 '{' 여야 JSON.
+  local trimmed="${out#"${out%%[![:space:]]*}"}"
+  if [[ -z "$trimmed" || ( "${trimmed:0:1}" != "[" && "${trimmed:0:1}" != "{" ) ]]; then
+    echo "mailskill: backend produced non-JSON stdout (see stderr above): $*" >&2
+    return 1
+  fi
+  printf '%s\n' "$out"
+}
+
 cmd="${1:-}"; shift || true
 case "$cmd" in
-  accounts) "$H" account list -o json ;;
-  folders)  "$H" folder list -a "${1:?account}" -o json ;;
-  list)     "$H" envelope list -a "${1:?account}" --page-size "${2:-20}" -o json ;;
-  search)   acct="${1:?account}"; shift; "$H" envelope list -a "$acct" -o json -- "$@" ;;
-  read)     "$H" message read "${2:?id}" -a "${1:?account}" ${3:+-f "$3"} -o json ;;
+  accounts)
+    if ! command -v "$H" >/dev/null 2>&1; then
+      echo "mailskill: backend '$H' not found in PATH — returning []" >&2
+      echo "[]"
+      exit 0
+    fi
+    out="$("$H" account list -o json 2>/dev/null)" || {
+      echo "mailskill: '$H account list' failed — returning []" >&2
+      echo "[]"
+      exit 0
+    }
+    if [[ -z "$out" || "$out" == "null" ]]; then
+      echo "[]"
+    else
+      echo "$out"
+    fi
+    ;;
+  folders)  json_verb "$H" folder list -a "${1:?account}" -o json ;;
+  list)
+    acct="${1:?account}"; shift
+    # list <acct> [-f <folder>] [n]
+    fold=(); [[ "${1:-}" == "-f" ]] && { fold=(-f "${2:?folder}"); shift 2; }
+    json_verb "$H" envelope list -a "$acct" ${fold[@]+"${fold[@]}"} --page-size "${1:-20}" -o json ;;
+  search)
+    acct="${1:?account}"; shift
+    # search <acct> [-f <folder>] <query...>   — 폴더 미지정 시 INBOX
+    fold=(); foldname="-"
+    [[ "${1:-}" == "-f" ]] && { fold=(-f "${2:?folder}"); foldname="$2"; shift 2; }
+    # himalaya 의 기본 페이지 크기는 10 이라, 그대로 두면 검색 결과가 조용히 10건에서
+    # 잘린다(실측: 24건짜리 질의가 10건으로 나옴). 잘렸는지 알 방법이 없으므로
+    # 포화되지 않을 때까지 페이지를 키운다. 끝까지 포화면 자르지 말고 실패시킨다.
+    out=""
+    for psize in 200 1000 5000; do
+      out="$(json_verb "$H" envelope list -a "$acct" ${fold[@]+"${fold[@]}"} \
+             --page-size "$psize" -o json -- "$@")" || exit $?
+      [[ "$(printf '%s' "$out" | grep -o '"id"' | wc -l | tr -d ' ')" -lt "$psize" ]] && break
+      if [[ "$psize" == 5000 ]]; then
+        echo "mailskill: 검색 결과가 5000건을 넘습니다 — 잘린 결과를 내보내지 않고 실패로 처리합니다. 기간·조건을 좁히십시오." >&2
+        exit 1
+      fi
+    done
+    # 서버측 날짜 검색이 0건이면 클라이언트측으로 재확인한다.
+    # 일부 IMAP 서버(네이버웍스 등)는 himalaya 가 쓰는 SENTSINCE/SENTBEFORE 에
+    # 에러 없이 늘 0건을 답한다 → 조용한 오탐. 자세한 내용은 scripts/date-search.py.
+    # 단, 재확인은 질의가 **날짜 조건만**으로 구성됐을 때만 한다 — from/subject 등이
+    # 섞인 질의를 날짜만으로 재조회하면 나머지 조건이 무시된 초과집합이 나가고,
+    # or/not 은 and 전제인 재확인과 의미가 다르다. 둘 다 "조용히 틀린 답"이므로 안 한다.
+    if [[ "$out" == "[]" ]]; then
+      toks=("$@")
+      # 정렬 꼬리(order by ...)는 결과 집합과 무관 — 떼고 판정한다.
+      for ((i = 0; i < ${#toks[@]}; i++)); do
+        [[ "${toks[i]}" == "order" && "${toks[i+1]:-}" == "by" ]] && { toks=(${toks[@]+"${toks[@]:0:i}"}); break; }
+      done
+      pure=1; dargs=(); prev=""
+      for tok in ${toks[@]+"${toks[@]}"}; do
+        case "$tok" in
+          after|before|date|and) ;;
+          *) [[ "$tok" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || pure=0 ;;
+        esac
+        case "$prev" in after|before|date) dargs+=("$prev=$tok") ;; esac
+        prev="$tok"
+      done
+      if [[ $pure -eq 1 && ${#dargs[@]} -gt 0 ]]; then
+        # 안내는 stderr 로도 내지 않는다 — 호출측이 두 스트림을 합쳐 받기 때문에
+        # 여기서 한 줄이라도 흘리면 이 어댑터가 지키려는 JSON 계약이 깨진다.
+        [[ -n "${MAILSKILL_LOG:-}" ]] && echo "mailskill: 서버측 날짜 검색 0건 → 클라이언트측 재확인" >&2
+        fb="$("$REPO/scripts/date-search.py" "$acct" "$foldname" "${dargs[@]}")" || exit $?
+        printf '%s\n' "$fb"
+        exit 0
+      fi
+    fi
+    printf '%s\n' "$out" ;;
+  read)     json_verb "$H" message read "${2:?id}" -a "${1:?account}" ${3:+-f "$3"} -o json ;;
   reply)    "$H" message reply "${2:?id}" -a "${1:?account}" ;;
   doctor)   "$H" account doctor "${1:?account}" ;;
   *) echo "usage: mail {accounts|folders|list|search|read|reply|doctor} ..." >&2; exit 2 ;;

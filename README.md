@@ -17,6 +17,9 @@
 | `scripts/mail-secret` | age에서 비번 조회(Himalaya `auth.cmd`가 호출) |
 | `scripts/secret-set`/`secret-edit` | 시크릿 추가/편집(모든 recipient로 재암호화) |
 | `scripts/bootstrap.sh` | 새 기계 셋업(deps + 심링크 + age 키) |
+| `bin/mailskill.ps1`, `scripts/mail-secret.ps1`, `scripts/secret-set.ps1` | 위 3종의 **Windows 네이티브(PowerShell)** 포트 |
+| `bin/*.cmd` (`mailskill`/`mail-secret`/`secret-set`) | Windows PATH 에서 bare 이름으로 부르는 shim |
+| `scripts/bootstrap.ps1` | Windows 셋업(deps 안내 + age 키 + 심링크/복사) |
 | `scripts/convert-local.py` | Apple Mail 로컬(.emlx) → Maildir 일괄 변환(읽기/검색용) |
 | `scripts/sent-to-dayone.py` | 특정 Maildir의 보낸메일 → Day One 저널(작성시각 보존) |
 | `config/config.sample.toml`, `config/mbsyncrc.sample` | 템플릿 |
@@ -31,6 +34,23 @@ scripts/secret-set himalaya-<name>       # 계정별 앱비번 등록
 mailskill accounts                            # 동작 확인
 ```
 리눅스는 `age`/`himalaya`를 패키지매니저/`cargo`로 설치하고 `~/.local/bin`이 PATH에 있는지 확인.
+
+## 설치 (Windows 네이티브)
+Git Bash/WSL 없이 **PowerShell + cmd 만으로** 동작한다. 어댑터·시크릿 스크립트의 PowerShell 포트(`*.ps1`)와 PATH shim(`bin\*.cmd`)이 들어 있다.
+```powershell
+winget install pimalaya.himalaya FiloSottile.age   # 엔진 + 암호화 (또는 scoop)
+git clone <this-repo> $HOME\dev\mail-skill
+$HOME\dev\mail-skill\scripts\bootstrap.ps1          # age 키 + 심링크(개발자 모드 없으면 복사)
+Copy-Item config\config.sample.toml $HOME\.config\himalaya\config.toml   # 계정 채우기
+setx PATH "$env:PATH;$HOME\dev\mail-skill\bin"       # mailskill/mail-secret 를 PATH 에
+# 새 터미널 열고:
+mailskill accounts
+secret-set himalaya-<name>                           # 계정별 앱비번 등록(숨김 입력)
+```
+- **PATH 의 `bin\` 이 핵심**이다. Himalaya 의 `auth.cmd = "mail-secret <name>"` 가 `mail-secret.cmd` 를 PATH 에서 찾아 비번을 얻는다 — 넣지 않으면 라이브 IMAP 인증이 실패한다.
+- **심링크엔 개발자 모드(또는 관리자)** 가 필요하다. bootstrap.ps1 은 실패 시 복사로 폴백하지만, 복사하면 SSOT가 깨져(레포 수정이 반영 안 됨) 개발자 모드를 켜 심링크로 두길 권한다.
+- **Python(선택)**: 날짜검색 클라이언트측 폴백(`date-search.py`)에만 쓴다. 없으면 대부분 동작하되, 일부 서버(네이버웍스 등)의 날짜검색이 조용히 0건일 때 폴백이 안 된다.
+- **caveat**: Himalaya 가 Windows 에서 `auth.cmd` 를 `cmd` 로 실행한다는 전제다(그럼 `.cmd` shim 이 걸린다). 만약 `sh` 로 실행하는 빌드라면 그 경우엔 Git Bash 의 bash `mail-secret` 이 대신 쓰인다. 실기계 최초 셋업 때 `mailskill doctor <acct>` 로 한 번 확인할 것.
 
 ## 어댑터 계약
 ```sh

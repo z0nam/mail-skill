@@ -18,8 +18,9 @@ else
 fi
 
 # 2) age 키 (기계별, 절대 동기화 안 함)
-mkdir -p "$HOME/.config/mail-mcp"
-KEY="$HOME/.config/mail-mcp/age-key.txt"
+# 경로는 리졸버(mail-secret)·README 와 일치해야 한다: mail-skill (과거 mail-mcp 였음).
+mkdir -p "$HOME/.config/mail-skill"
+KEY="$HOME/.config/mail-skill/age-key.txt"
 [ -f "$KEY" ] || { age-keygen -o "$KEY"; chmod 600 "$KEY"; }
 PUB="$(age-keygen -y "$KEY")"
 
