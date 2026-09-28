@@ -59,6 +59,17 @@ JSON 동사(`accounts`/`folders`/`list`/`search`/`read`)는 **stdout 에 JSON �
 그대로 파싱하면 된다. 실패는 exit code 로 판별한다 — stdout 이 비어 있으면 실패다.
 백엔드 로그를 보려면 `MAILSKILL_LOG=debug`(stderr 로만 나감).
 
+`read` 만 모양이 다르다 — 배열·객체가 아니라 **JSON 문자열 스칼라 하나**다.
+헤더와 본문이 `\n` 으로 이어진 메시지 전문이 통째로 들어 있다.
+
+```
+$ mailskill read ji 10895
+"From: ...\nSubject: ...\n\n주무관님 안녕하세요.\n..."
+```
+
+파싱하면 `dict`/`list` 가 아니라 `str` 이 나온다. 제목·발신자만 필요하면 `list`/`search`
+결과를 쓰고, 본문이 필요할 때만 `read` 한다.
+
 ## 회신/발송 — 승인 필수
 1. 대상 메시지를 `read`로 파악.
 2. 회신 초안(받는사람/제목/본문)을 **사용자에게 보여준다**.

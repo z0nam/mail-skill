@@ -60,7 +60,10 @@ function Invoke-Json([string[]]$BackendArgs) {
         if ($env:MAILSKILL_LOG -and $errText) { [Console]::Error.Write($errText) }
         $text = (@($out) -join "`n")
         $trimmed = $text.TrimStart()
-        if (-not $trimmed -or ($trimmed[0] -ne '[' -and $trimmed[0] -ne '{')) {
+        # 첫 글자가 '[' '{' '"' 중 하나여야 JSON. '"' 를 받는 이유: himalaya v1.2.0 의
+        # `message read -o json` 은 메시지 전체를 JSON 문자열 스칼라 하나로 낸다.
+        # 배열·객체만 허용하면 이 멀쩡한 출력이 반려돼 read 가 구조적으로 늘 실패한다.
+        if (-not $trimmed -or ($trimmed[0] -ne '[' -and $trimmed[0] -ne '{' -and $trimmed[0] -ne '"')) {
             Fail "mailskill: backend produced non-JSON stdout (see stderr above): $($BackendArgs -join ' ')" 1
         }
         return $text
@@ -68,8 +71,26 @@ function Invoke-Json([string[]]$BackendArgs) {
     finally { Remove-Item -LiteralPath $errFile -ErrorAction SilentlyContinue }
 }
 
+# 사용법은 이 파일 맨 위 계약 주석에서 뽑는다 — 두 군데에 적어두면 갈라진다.
+# -ToErr: 사용법을 stderr 로(무동사=사용법 에러 경로용, bash 판과 동일).
+function Show-Usage([switch]$ToErr) {
+    $lines = @('usage: mailskill {accounts|folders|list|search|read|reply|doctor} ...', '')
+    $lines += Get-Content -LiteralPath $PSCommandPath |
+        Where-Object { $_ -match '^#   mailskill ' } |
+        ForEach-Object { $_ -replace '^#   ', '  ' }
+    foreach ($l in $lines) {
+        if ($ToErr) { [Console]::Error.WriteLine($l) } else { [Console]::Out.WriteLine($l) }
+    }
+}
+
 $cmd = if ($args.Count -ge 1) { $args[0] } else { '' }
 $rest = Tail $args 1
+# 명시적 help(동사 -h/--help/help, 또는 <동사> -h/--help) → 사용법 후 exit 0.
+if ($cmd -in @('-h', '--help', 'help') -or ($rest.Count -ge 1 -and $rest[0] -in @('-h', '--help'))) {
+    Show-Usage; exit 0
+}
+# 무동사 → 사용법(에러) 후 exit 2. CI 계약: no-args → 2.
+if ($cmd -eq '') { Show-Usage -ToErr; exit 2 }
 
 switch ($cmd) {
     'accounts' {
@@ -161,6 +182,8 @@ switch ($cmd) {
         exit $LASTEXITCODE
     }
     default {
-        Fail 'usage: mailskill {accounts|folders|list|search|read|reply|doctor} ...' 2
+        [Console]::Error.WriteLine("mailskill: 알 수 없는 동사 '$cmd'")
+        Show-Usage | ForEach-Object { [Console]::Error.WriteLine($_) }
+        exit 2
     }
 }
