@@ -6,6 +6,7 @@
 #   mailskill search  <acct> [-f <폴더>] <query...> IMAP 쿼리 검색 (JSON)
 #   mailskill read    <acct> <id> [folder] 메시지 읽기 (JSON)
 #   mailskill reply   <acct> <id>          회신(초안) — 발송 전 사용자 승인 필수
+#   mailskill send    <acct> [옵션]        메일 발송/답장(첨부 가능) — 기본 미리보기, --send 로 실전송
 #   mailskill watch   <acct> [옵션]        새 메일 폴링 대기 (도착 exit 0, 시간초과 exit 2)
 #   mailskill doctor  <acct>               백엔드/계정 상태 점검
 #
@@ -181,6 +182,155 @@ switch ($cmd) {
         $acct = Req $rest[0] 'account'; $id = Req $rest[1] 'id'
         & $H message reply $id -a $acct
         exit $LASTEXITCODE
+    }
+    'send' {
+        $acct = Req $rest[0] 'account'
+        $opts = Tail $rest 1
+        $to = $null; $cc = $null; $bcc = $null; $subj = $null
+        $replyto = $null; $replyfold = $null
+        $body = $null; $bodyfile = $null; $attach = @()
+        $dosend = $false; $force = $false; $dupwindow = 10; $hasbody = $false
+
+        $i = 0
+        while ($i -lt $opts.Count) {
+            $opt = $opts[$i]
+            switch ($opt) {
+                '--to'           { $to = Req $opts[$i + 1] 'to'; $i += 2 }
+                '--cc'           { $cc = Req $opts[$i + 1] 'cc'; $i += 2 }
+                '--bcc'          { $bcc = Req $opts[$i + 1] 'bcc'; $i += 2 }
+                '--subject'      { $subj = Req $opts[$i + 1] 'subject'; $i += 2 }
+                '--reply-to'     { $replyto = Req $opts[$i + 1] 'reply-to'; $i += 2 }
+                '--reply-folder' { $replyfold = Req $opts[$i + 1] 'reply-folder'; $i += 2 }
+                '--body'         { $body = Req $opts[$i + 1] 'body'; $hasbody = $true; $i += 2 }
+                '--body-file'    { $bodyfile = Req $opts[$i + 1] 'body-file'; $hasbody = $true; $i += 2 }
+                '--attach'       { $attach += (Req $opts[$i + 1] 'attach'); $i += 2 }
+                '--force'        { $force = $true; $i += 1 }
+                '--dup-window'   { $dupwindow = [int](Req $opts[$i + 1] 'dup-window'); $i += 2 }
+                '--send'         { $dosend = $true; $i += 1 }
+                default {
+                    Fail "mailskill send: 알 수 없는 옵션 '$opt'" 2
+                }
+            }
+        }
+
+        if (-not $to -and -not $replyto) {
+            Fail "mailskill send: --to 또는 --reply-to 필요" 2
+        }
+        if (-not $subj -and -not $replyto) {
+            Fail "mailskill send: --subject 또는 --reply-to 필요" 2
+        }
+        if (-not $hasbody) {
+            Fail "mailskill send: --body 또는 --body-file 필요" 2
+        }
+
+        # stdin 본문이면 임시 파일에 먼저 보존(BOM 없는 UTF-8 인스턴스로 저장하여 U+FEFF 누출 방지)
+        $stdinTmp = $null
+        if ($bodyfile -eq "-") {
+            $stdinTmp = [System.IO.Path]::GetTempFileName()
+            $stdinContent = [Console]::In.ReadToEnd()
+            $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+            [System.IO.File]::WriteAllText($stdinTmp, $stdinContent, $utf8NoBom)
+            $bodyfile = $stdinTmp
+        }
+
+        try {
+            $config = if ($env:HIMALAYA_CONFIG) { $env:HIMALAYA_CONFIG } else { Join-Path $HOME '.config\himalaya\config.toml' }
+            if (-not (Test-Path $config)) { $config = Join-Path $REPO 'config\config.toml' }
+
+            $py = Get-PythonExe
+            $composePy = Join-Path $REPO 'scripts\compose-mime.py'
+            $dupGuardPy = Join-Path $REPO 'scripts\dup-guard.py'
+
+            $cargs = @($composePy, '--from-account', $acct, '--config', $config, '--himalaya-bin', $H)
+            if ($to) { $cargs += @('--to', $to) }
+            if ($cc) { $cargs += @('--cc', $cc) }
+            if ($bcc) { $cargs += @('--bcc', $bcc) }
+            if ($subj) { $cargs += @('--subject', $subj) }
+            if ($replyto) { $cargs += @('--reply-to-id', $replyto) }
+            if ($replyfold) { $cargs += @('--reply-folder', $replyfold) }
+            if ($null -ne $body) { $cargs += @('--body', $body) }
+            if ($bodyfile) { $cargs += @('--body-file', $bodyfile) }
+            foreach ($att in $attach) { $cargs += @('--attach', $att) }
+
+            # 1. 메타데이터 조회
+            $metaJson = & $py @cargs @('--dump-meta')
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $metaText = (@($metaJson) -join "`n")
+            $meta = $metaText | ConvertFrom-Json
+            $metaTo = $meta.to
+            $metaSubj = $meta.subject
+            $inReplyTo = $meta.in_reply_to
+            $references = $meta.references
+
+            # 2. 미리보기
+            if (-not $dosend) {
+                $dupWarn = 0
+                if (-not $force) {
+                    $null = & $py $dupGuardPy --account $acct --to $metaTo --subject $metaSubj --window $dupwindow --config $config --himalaya-bin $H 2>$null
+                    $dupWarn = $LASTEXITCODE
+                }
+                Emit '── mailskill send 미리보기 (실전송하려면 동일 명령에 --send 추가) ──'
+                Emit "계정(From): $acct"
+                Emit "받는사람  : $metaTo"
+                if ($cc) { Emit "참조      : $cc" }
+                if ($bcc) { Emit "숨은참조  : $bcc" }
+                Emit "제목      : $metaSubj"
+                if ($inReplyTo) { Emit "In-Reply-To: $inReplyTo" }
+                if ($references) { Emit "References : $references" }
+                if ($attach.Count -gt 0) { Emit "첨부      : $($attach -join ' ')" }
+                Emit '본문:'
+                if ($null -ne $body) {
+                    foreach ($l in $body.Split("`n")) { Emit "  $l" }
+                } elseif ($bodyfile -eq '-') {
+                    Emit '  (stdin)'
+                } else {
+                    $bLines = Get-Content -LiteralPath $bodyfile -ErrorAction SilentlyContinue | Select-Object -First 60
+                    foreach ($l in $bLines) { Emit "  $l" }
+                }
+                if ($dupWarn -eq 3) {
+                    Emit ''
+                    Emit "⚠️  주의: 최근 ${dupwindow}분 내 동일 수신자+제목 발송 이력이 있습니다. 실전송 시 --force 옵션이 필요합니다."
+                }
+                exit 0
+            }
+
+            # 3. 실전송
+            # 중복 발송 가드: --force 가 아닐 때 보낸편지함 검사
+            if (-not $force) {
+                & $py $dupGuardPy --account $acct --to $metaTo --subject $metaSubj --window $dupwindow --config $config --himalaya-bin $H
+                if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            }
+
+            # himalaya message send 실행 및 APPEND-UID 오류('발송 성공'으로 분류) 처리
+            # compose-mime.py 의 -o 옵션으로 UTF-8 바이너리 파일을 직접 생성하여 파이프 인코딩 왜곡 방지
+            $tmpMime = [System.IO.Path]::GetTempFileName()
+            $errFile = [System.IO.Path]::GetTempFileName()
+            try {
+                & $py @cargs @('-o', $tmpMime)
+                if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+                cmd /c "`"$H`" message send -a `"$acct`" < `"$tmpMime`" 2>`"$errFile`""
+                $rc = $LASTEXITCODE
+                $errText = Get-Content -Raw -LiteralPath $errFile -ErrorAction SilentlyContinue
+                if ($rc -ne 0) {
+                    if ($errText -match 'cannot find UID of appended IMAP message') {
+                        [Console]::Error.WriteLine('mailskill send: 발송 완료, 보낸함 저장 확인 실패 — 재시도 금지 (cannot find UID of appended IMAP message)')
+                        [Console]::Error.WriteLine('메일은 SMTP로 정상 발송되었습니다. 수신자에게 이미 전달되었으므로 절대 재시도하지 마십시오.')
+                        exit 0
+                    }
+                    if ($errText) { [Console]::Error.Write($errText) }
+                    Fail "mailskill send: 발송 실패 (exit $rc)" $rc
+                }
+                [Console]::Error.WriteLine('mailskill send: 발송 완료')
+                exit 0
+            }
+            finally {
+                Remove-Item -LiteralPath $tmpMime -ErrorAction SilentlyContinue
+                Remove-Item -LiteralPath $errFile -ErrorAction SilentlyContinue
+            }
+        }
+        finally {
+            if ($stdinTmp) { Remove-Item -LiteralPath $stdinTmp -ErrorAction SilentlyContinue }
+        }
     }
     'doctor' {
         $acct = Req $rest[0] 'account'

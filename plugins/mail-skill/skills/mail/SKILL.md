@@ -21,7 +21,8 @@ mailskill list   <acct> [-f <폴더>] [n]  # 최근 n통 (폴더 미지정 시 I
 mailskill search <acct> [-f <폴더>] <query...>   # 쿼리 검색 (문법은 아래)
 mailskill read   <acct> <id> [folder]   # 메시지 읽기
 mailskill folders <acct>                # 폴더 목록
-mailskill reply  <acct> <id>            # 회신 초안
+mailskill reply  <acct> <id>            # 회신 초안 (대화형 $EDITOR)
+mailskill send   <acct> [옵션...]       # 메일 발송/비대화형 답장 (미리보기 기본, --send 로 실전송)
 mailskill watch  <acct> [옵션...]       # 새 메일/회신 폴링 대기 (별칭: mail-watch)
 ```
 멀티계정 횡단 검색은 `mailskill accounts`로 이름을 얻어 각 계정에 `search`를 돌리고 합친다.
@@ -91,10 +92,30 @@ mailskill watch <acct> --from a@x --after-id 11090 --once
   - 세션을 닫으면 백그라운드 대기 프로세스도 함께 멈춘다.
   - 백그라운드 명령 종료 시 자동 웨이크업을 지원하지 않는 호스트(Codex 등)에서는 동기로 기다리는 용도로만 쓰인다.
 
-## 회신/발송 — 승인 필수
-1. 대상 메시지를 `read`로 파악.
-2. 회신 초안(받는사람/제목/본문)을 **사용자에게 보여준다**.
-3. **명시적 승인 후에만** 전송. 승인 없이는 절대 보내지 않는다. (connector는 `create_draft`로 초안만.)
+## 회신/발송 (`mailskill send`) — 승인 필수
+에이전트가 비대화형으로 메일을 발송하거나 회신할 때는 **반드시 `mailskill send`**를 사용한다 (himalaya 직접 호출 금지).
+
+```sh
+# 1) 일반 새 메일 발송 (기본: 미리보기)
+mailskill send ji --to user@example.com --subject "안내" --body "본문입니다."
+# 승인 후 실제 전송: 동일 명령에 --send 추가
+mailskill send ji --to user@example.com --subject "안내" --body "본문입니다." --send
+
+# 2) 비대화형 답장 (--reply-to <id>)
+# 원 메일의 Message-ID 로 In-Reply-To/References 를 채우고, 제목 Re: 및 수신자 자동 매핑
+mailskill send ji --reply-to 11127 --body "확인했습니다."
+# 승인 후 실제 전송:
+mailskill send ji --reply-to 11127 --body "확인했습니다." --send
+
+# 3) 첨부파일 및 본문 파일
+mailskill send ji --to user@example.com --subject "자료 송부" --body-file ./report.txt --attach ./file.pdf --send
+```
+
+### 안전 보호 장치 (이슈 #7 해결)
+1. **미리보기 게이트**: `--send` 옵션이 없으면 절대 전송되지 않고 헤더와 본문 미리보기만 출력한다.
+2. **중복 발송 가드**: `--send` 실행 직전 보낸편지함에서 최근 10분(기본) 내 **동일 수신자 + 동일 제목** 메일이 감지되면 발송을 차단(exit 3)하고 경고를 출력한다. 의도적인 재발송은 `--force` 플래그를 추가한다.
+3. **APPEND-UID 오류 안전 처리**: 네이버웍스(`ji`) 등 일부 IMAP/SMTP 서버에서 SMTP 전송 성공 후 보낸편지함 저장 단계에서 `cannot find UID of appended IMAP message` 오류로 비정상 종료되는 현상이 있다. 메일은 이미 수신자에게 전송되었으므로, `mailskill send`는 이를 **발송 성공(보낸함 저장 확인 실패)으로 자동 분류하여 exit 0**으로 종료하고 "재시도 금지" 경고를 출력한다 (에이전트가 실패로 오인해 재전송하는 버그 원천 방지).
+4. **한글 제목 RFC 2047 인코딩 보호**: `compose-mime.py`(파이썬 표준 라이브러리)를 통해 MIME을 조립하므로, 3바이트 UTF-8 한글 글자가 인코딩 단어 경계에서 쪼개지는 깨짐 현상이 발생하지 않는다.
 
 ## 시크릿 (age, 선택적 멀티머신)
 비번은 `secrets/secrets.age`(age 암호화)에 있고 `auth.cmd = "mail-secret <name>"`가 복호화 공급. 기계별 키 `~/.config/mail-skill/age-key.txt`. macOS/Linux 공통. 디버그: `mail-secret <name>`.

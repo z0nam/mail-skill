@@ -23,6 +23,8 @@
 | `scripts/convert-local.py` | Apple Mail 로컬(.emlx) → Maildir 일괄 변환(읽기/검색용) |
 | `scripts/sent-to-dayone.py` | 특정 Maildir의 보낸메일 → Day One 저널(작성시각 보존) |
 | `scripts/mail-watch.py` | 새 메일/회신 폴링 대기(`mailskill watch` 백엔드, bash/ps1 공용) |
+| `scripts/compose-mime.py` | raw MIME 메시지 조립 및 답장 헤더 자동 완성(bash/ps1 공용) |
+| `scripts/dup-guard.py` | 보낸편지함 최근 발송 중복 가드(bash/ps1 공용) |
 | `config/config.sample.toml`, `config/mbsyncrc.sample` | 템플릿 |
 
 ## 설치 (macOS 예)
@@ -59,7 +61,8 @@ mailskill accounts                     # 계정 목록(JSON)
 mailskill list   <acct> [n]            # 최근 n통
 mailskill search <acct> <query...>     # IMAP 쿼리 검색
 mailskill read   <acct> <id> [folder]  # 메시지 읽기
-mailskill reply  <acct> <id>           # 회신 초안 (발송은 사용자 승인 후)
+mailskill reply  <acct> <id>           # 회신 초안 (대화형 $EDITOR)
+mailskill send   <acct> [옵션...]      # 메일 발송/비대화형 답장 (미리보기 기본, --send 로 실전송)
 mailskill watch  <acct> [옵션...]      # 새 메일/회신 폴링 대기 (도착 exit 0, 만료 exit 2)
 ```
 

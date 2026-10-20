@@ -8,6 +8,7 @@
 #   mail search  <acct> <query...>    IMAP 쿼리 검색 (JSON)
 #   mail read    <acct> <id> [folder] 메시지 읽기 (JSON)
 #   mail reply   <acct> <id>          회신(초안) — 발송 전 사용자 승인 필수
+#   mail send    <acct> [옵션]        메일 발송/답장(첨부 가능) — 기본 미리보기, --send 로 실전송
 #   mail watch   <acct> [옵션]        새 메일 폴링 대기 (도착 exit 0, 시간초과 exit 2)
 #   mail doctor  <acct>               백엔드/계정 상태 점검
 #
@@ -155,6 +156,122 @@ case "$cmd" in
     printf '%s\n' "$out" ;;
   read)     json_verb "$H" message read "${2:?id}" -a "${1:?account}" ${3:+-f "$3"} -o json ;;
   reply)    "$H" message reply "${2:?id}" -a "${1:?account}" ;;
+  send)
+    # send <acct> (--to <a>|--reply-to <id>) [--cc <a>] [--bcc <a>] [--subject <s>]
+    #             (--body <t>|--body-file <f|->) [--attach <f>]... [--reply-folder <f>]
+    #             [--force] [--dup-window <min>] [--send]
+    # 기본은 미리보기(승인 게이트) — 실제 전송은 --send 를 명시해야 한다(SKILL 계약).
+    acct="${1:?account}"; shift
+    to=""; cc=""; bcc=""; subj=""; body=""; bodyfile=""; attach=()
+    replyto=""; replyfold=""; dosend=0; force=0; dupwindow=10; hasbody=0
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --to)           to="${2:?}"; shift 2 ;;
+        --cc)           cc="${2:?}"; shift 2 ;;
+        --bcc)          bcc="${2:?}"; shift 2 ;;
+        --subject)      subj="${2:?}"; shift 2 ;;
+        --reply-to)     replyto="${2:?}"; shift 2 ;;
+        --reply-folder) replyfold="${2:?}"; shift 2 ;;
+        --body)         body="${2:?}"; hasbody=1; shift 2 ;;
+        --body-file)    bodyfile="${2:?}"; hasbody=1; shift 2 ;;
+        --attach)       attach+=("${2:?}"); shift 2 ;;
+        --force)        force=1; shift ;;
+        --dup-window)   dupwindow="${2:?}"; shift 2 ;;
+        --send)         dosend=1; shift ;;
+        *) echo "mailskill send: 알 수 없는 옵션 '$1'" >&2; exit 2 ;;
+      esac
+    done
+    if [[ -z "$to" && -z "$replyto" ]]; then
+      echo "mailskill send: --to 또는 --reply-to 필요" >&2; exit 2
+    fi
+    if [[ -z "$subj" && -z "$replyto" ]]; then
+      echo "mailskill send: --subject 또는 --reply-to 필요" >&2; exit 2
+    fi
+    [[ "$hasbody" -eq 1 ]] || { echo "mailskill send: --body 또는 --body-file 필요" >&2; exit 2; }
+    # stdin 본문이면 임시 파일에 먼저 보존(compose-mime 이 dump-meta 와 MIME 조립으로 두 번 불리므로 stdin 고갈 방지)
+    stdin_tmp=""
+    if [[ "$bodyfile" == "-" ]]; then
+      stdin_tmp="$(mktemp)"
+      cat > "$stdin_tmp"
+      bodyfile="$stdin_tmp"
+    fi
+    trap 'rm -f "${stdin_tmp:-}"' EXIT
+    CONFIG="${HIMALAYA_CONFIG:-$HOME/.config/himalaya/config.toml}"; [[ -f "$CONFIG" ]] || CONFIG="$REPO/config/config.toml"
+    cargs=(--from-account "$acct" --config "$CONFIG" --himalaya-bin "$H")
+    [[ -n "$to"        ]] && cargs+=(--to "$to")
+    [[ -n "$cc"        ]] && cargs+=(--cc "$cc")
+    [[ -n "$bcc"       ]] && cargs+=(--bcc "$bcc")
+    [[ -n "$subj"      ]] && cargs+=(--subject "$subj")
+    [[ -n "$replyto"   ]] && cargs+=(--reply-to-id "$replyto")
+    [[ -n "$replyfold" ]] && cargs+=(--reply-folder "$replyfold")
+    [[ -n "$body"      ]] && cargs+=(--body "$body")
+    [[ -n "$bodyfile"  ]] && cargs+=(--body-file "$bodyfile")
+    for f in ${attach[@]+"${attach[@]}"}; do cargs+=(--attach "$f"); done
+
+    # 1. 메타데이터 추출 (계산된 To, Subject, In-Reply-To 등 확인, stdin 파이프로 대용량 인자 한도 회피)
+    meta="$("$REPO/scripts/compose-mime.py" "${cargs[@]}" --dump-meta)" || exit $?
+    IFS=$'\t' read -r meta_to meta_subj in_reply_to references < <(printf '%s' "$meta" | python3 -c '
+import json, sys
+m = json.load(sys.stdin)
+print("\t".join([m.get("to", ""), m.get("subject", ""), m.get("in_reply_to", ""), m.get("references", "")]))
+')
+
+    # 2. MIME 조립
+    raw="$("$REPO/scripts/compose-mime.py" "${cargs[@]}")" || exit $?
+
+    # 3. 미리보기 (dosend == 0)
+    if [[ "$dosend" -eq 0 ]]; then
+      dup_warn=0
+      if [[ "$force" -eq 0 ]]; then
+        "$REPO/scripts/dup-guard.py" --account "$acct" --to "$meta_to" --subject "$meta_subj" \
+          --window "$dupwindow" --config "$CONFIG" --himalaya-bin "$H" >/dev/null 2>&1 || dup_warn=$?
+      fi
+      echo "── mailskill send 미리보기 (실전송하려면 동일 명령에 --send 추가) ──"
+      echo "계정(From): $acct"
+      echo "받는사람  : $meta_to"
+      [[ -n "$cc"          ]] && echo "참조      : $cc"
+      [[ -n "$bcc"         ]] && echo "숨은참조  : $bcc"
+      echo "제목      : $meta_subj"
+      [[ -n "$in_reply_to" ]] && echo "In-Reply-To: $in_reply_to"
+      [[ -n "$references"  ]] && echo "References : $references"
+      [[ "${#attach[@]}" -gt 0 ]] && echo "첨부      : ${attach[*]}"
+      echo "본문:"
+      if [[ -n "$body" ]]; then printf '%s\n' "$body" | sed 's/^/  /'
+      elif [[ "$bodyfile" == "-" ]]; then echo "  (stdin)"
+      else sed 's/^/  /' "$bodyfile" 2>/dev/null | head -60; fi
+      if [[ "$dup_warn" -eq 3 ]]; then
+        echo
+        echo "⚠️  주의: 최근 ${dupwindow}분 내 동일 수신자+제목 발송 이력이 있습니다. 실전송 시 --force 옵션이 필요합니다."
+      fi
+      exit 0
+    fi
+
+    # 4. 실전송 (dosend == 1)
+    # 중복 발송 가드: --force 가 아닐 때 보낸편지함 검사
+    if [[ "$force" -eq 0 ]]; then
+      "$REPO/scripts/dup-guard.py" --account "$acct" --to "$meta_to" --subject "$meta_subj" \
+        --window "$dupwindow" --config "$CONFIG" --himalaya-bin "$H" || exit $?
+    fi
+
+    # himalaya message send 실행 및 APPEND-UID 오류('발송 성공'으로 분류) 처리
+    errFile="$(mktemp)"
+    rc=0
+    printf '%s' "$raw" | "$H" message send -a "$acct" 2>"$errFile" || rc=$?
+    if [[ $rc -ne 0 ]]; then
+      if grep -q "cannot find UID of appended IMAP message" "$errFile"; then
+        echo "mailskill send: 발송 완료, 보낸함 저장 확인 실패 — 재시도 금지 (cannot find UID of appended IMAP message)" >&2
+        echo "메일은 SMTP로 정상 발송되었습니다. 수신자에게 이미 전달되었으므로 절대 재시도하지 마십시오." >&2
+        rm -f "$errFile"
+        exit 0
+      fi
+      cat "$errFile" >&2
+      rm -f "$errFile"
+      echo "mailskill send: 발송 실패 (exit $rc)" >&2
+      exit "$rc"
+    fi
+    rm -f "$errFile"
+    echo "mailskill send: 발송 완료" >&2
+    ;;
   doctor)   "$H" account doctor "${1:?account}" ;;
   *) echo "mailskill: 알 수 없는 동사 '$cmd'" >&2; usage >&2; exit 2 ;;
 esac
