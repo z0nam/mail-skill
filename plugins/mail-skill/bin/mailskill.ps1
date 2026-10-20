@@ -6,6 +6,7 @@
 #   mailskill search  <acct> [-f <폴더>] <query...> IMAP 쿼리 검색 (JSON)
 #   mailskill read    <acct> <id> [folder] 메시지 읽기 (JSON)
 #   mailskill reply   <acct> <id>          회신(초안) — 발송 전 사용자 승인 필수
+#   mailskill watch   <acct> [옵션]        새 메일 폴링 대기 (도착 exit 0, 시간초과 exit 2)
 #   mailskill doctor  <acct>               백엔드/계정 상태 점검
 #
 # stdout 계약: JSON 동사(accounts/folders/list/search/read)는 stdout 에 JSON 만 낸다.
@@ -74,7 +75,7 @@ function Invoke-Json([string[]]$BackendArgs) {
 # 사용법은 이 파일 맨 위 계약 주석에서 뽑는다 — 두 군데에 적어두면 갈라진다.
 # -ToErr: 사용법을 stderr 로(무동사=사용법 에러 경로용, bash 판과 동일).
 function Show-Usage([switch]$ToErr) {
-    $lines = @('usage: mailskill {accounts|folders|list|search|read|reply|doctor} ...', '')
+    $lines = @('usage: mailskill {accounts|folders|list|search|read|reply|watch|doctor} ...', '')
     $lines += Get-Content -LiteralPath $PSCommandPath |
         Where-Object { $_ -match '^#   mailskill ' } |
         ForEach-Object { $_ -replace '^#   ', '  ' }
@@ -85,6 +86,11 @@ function Show-Usage([switch]$ToErr) {
 
 $cmd = if ($args.Count -ge 1) { $args[0] } else { '' }
 $rest = Tail $args 1
+if ($cmd -eq 'watch') {
+    $py = Get-PythonExe
+    & $py (Join-Path $REPO 'scripts\mail-watch.py') @rest
+    exit $LASTEXITCODE
+}
 # 명시적 help(동사 -h/--help/help, 또는 <동사> -h/--help) → 사용법 후 exit 0.
 if ($cmd -in @('-h', '--help', 'help') -or ($rest.Count -ge 1 -and $rest[0] -in @('-h', '--help'))) {
     Show-Usage; exit 0

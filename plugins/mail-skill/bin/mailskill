@@ -8,6 +8,7 @@
 #   mail search  <acct> <query...>    IMAP 쿼리 검색 (JSON)
 #   mail read    <acct> <id> [folder] 메시지 읽기 (JSON)
 #   mail reply   <acct> <id>          회신(초안) — 발송 전 사용자 승인 필수
+#   mail watch   <acct> [옵션]        새 메일 폴링 대기 (도착 exit 0, 시간초과 exit 2)
 #   mail doctor  <acct>               백엔드/계정 상태 점검
 #
 # stdout 계약: JSON 을 내는 동사(accounts/folders/list/search/read)는 **stdout 에 JSON 만**
@@ -65,12 +66,15 @@ json_verb() {
 
 # 사용법은 이 파일 맨 위 계약 주석에서 뽑는다 — 두 군데에 적어두면 갈라진다.
 usage() {
-  echo "usage: mailskill {accounts|folders|list|search|read|reply|doctor} ..."
+  echo "usage: mailskill {accounts|folders|list|search|read|reply|watch|doctor} ..."
   echo
   grep '^#   mail ' "$self" | sed 's/^#   mail /  mailskill /'
 }
 
 cmd="${1:-}"; shift || true
+if [[ "$cmd" == "watch" ]]; then
+  exec "$REPO/scripts/mail-watch.py" "$@"
+fi
 # 동사 바로 뒤의 -h/--help 는 인자 검사보다 먼저 받는다. 그러지 않으면
 # `mailskill read --help` 가 필수 인자 검사(${2:?id})에 먼저 걸려 bash 내부 에러만 낸다.
 case "${1:-}" in -h|--help) usage; exit 0 ;; esac

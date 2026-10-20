@@ -1,11 +1,11 @@
 ---
 name: mail
-description: Search, read, and draft replies to email across many accounts (Gmail + IMAP + local archives) for an AI agent. Use when the user wants to find emails, check an inbox, read a message, or draft a reply across their mail accounts. Korean or English both apply.
+description: Search, read, watch for new messages/replies, and draft replies to email across many accounts (Gmail + IMAP + local archives) for an AI agent. Use when the user wants to find emails, check an inbox, wait/poll for incoming replies, read a message, or draft a reply across their mail accounts. Korean or English both apply.
 ---
 
 # mailskill — 멀티계정 메일 (엔진 중립 어댑터)
 
-여러 메일 계정을 검색·읽기·회신초안 작성. **`mailskill` 어댑터**(`bin/mailskill`)를 통해 호출한다 — 백엔드는 현재 [Himalaya](https://github.com/pimalaya/himalaya)지만 어댑터 뒤에 숨어 있어 엔진을 바꿔도 사용법은 동일하다.
+여러 메일 계정을 검색·읽기·수신 대기·회신초안 작성. **`mailskill` 어댑터**(`bin/mailskill`)를 통해 호출한다 — 백엔드는 현재 [Himalaya](https://github.com/pimalaya/himalaya)지만 어댑터 뒤에 숨어 있어 엔진을 바꿔도 사용법은 동일하다.
 
 ## 라우팅 (세 갈래)
 - **주 Gmail 1계정**(설정의 `gmail` 계정) → OAuth Gmail 커넥터가 호스트에 있으면 사용(예: Claude/Codex Gmail connector). 커넥터가 노출되지 않았거나 재인증이 필요하면 사용자에게 연결/재인증을 안내한다. 앱비번이 없어 `mailskill`로는 못 붙으니, 커넥터를 쓸 수 없는 호스트에선 다른 계정으로 안내.
@@ -14,7 +14,7 @@ description: Search, read, and draft replies to email across many accounts (Gmai
 
 요청이 어느 계정인지 불명확하면 `mailskill accounts`로 목록을 보고 판단하거나 사용자에게 묻는다.
 
-## 어댑터 사용 (항상 JSON)
+## 어댑터 사용 (항상 JSON, `watch`/`reply`/`doctor` 제외)
 ```sh
 mailskill accounts                      # 계정 목록
 mailskill list   <acct> [-f <폴더>] [n]  # 최근 n통 (폴더 미지정 시 INBOX)
@@ -22,6 +22,7 @@ mailskill search <acct> [-f <폴더>] <query...>   # 쿼리 검색 (문법은 �
 mailskill read   <acct> <id> [folder]   # 메시지 읽기
 mailskill folders <acct>                # 폴더 목록
 mailskill reply  <acct> <id>            # 회신 초안
+mailskill watch  <acct> [옵션...]       # 새 메일/회신 폴링 대기 (별칭: mail-watch)
 ```
 멀티계정 횡단 검색은 `mailskill accounts`로 이름을 얻어 각 계정에 `search`를 돌리고 합친다.
 
@@ -69,6 +70,26 @@ $ mailskill read ji 10895
 
 파싱하면 `dict`/`list` 가 아니라 `str` 이 나온다. 제목·발신자만 필요하면 `list`/`search`
 결과를 쓰고, 본문이 필요할 때만 `read` 한다.
+
+## 새 메일 / 회신 대기 (`mailskill watch`)
+상대방의 회신이나 특정 메일이 올 때까지 주기적으로 폴링한다. **회신을 기다릴 때는 백그라운드로 띄운다** (Claude Code의 Bash `run_in_background` 등 — 조건이 충족되어 프로세스가 종료되는 순간 세션이 깨어난다).
+
+```sh
+mailskill watch <acct> --from a@x,b@y [--subject 키워드] [--until 18:30] [--interval 300]
+mailskill watch <acct> --subject "검토 의견" --timeout 2h
+mailskill watch <acct> --from a@x --after-id 11090 --once
+```
+
+- **기준점 자동 감지**: `--after-id N`과 `--since 시각`을 모두 생략하면 **시작할 때 폴더의 최신 메일 ID를 자동으로 잡아** 그 이후에 도착하는 메일만 감시한다(수동 ID 입력 실수 방지). 이미 도착했을 수 있는 메일까지 포함해 찾으려면 `--after-id N` 또는 `--since HH:MM`(또는 `YYYY-MM-DD HH:MM`)을 명시한다.
+- **필터**: `--from`은 콤마(`,`)로 여러 발신자를 지정하거나 옵션을 반복할 수 있으며 발신자 주소·이름 모두에 대소문자 무시 부분 일치한다. `--subject`는 제목 부분 일치다. 서버측 IMAP 검색 버그(네이버웍스 등)를 타지 않도록 최신 봉투 목록을 가져와 클라이언트에서 필터링한다.
+- **종료 코드 (`pr-watch`와 동일 체계)**:
+  - `0`: 새 메일 도착 — ID·보낸사람·제목·시각과 후속 `mailskill read` 명령을 출력하고 종료 (`--json` 지정 시 매칭 봉투 JSON 배열 출력)
+  - `2`: 대기 시간 만료 (`--until` 또는 `--timeout` 도달, 혹은 `--once`에서 미도착)
+  - `3`: 연속 백엔드 조회 실패 한도 초과 (기본 5회)
+  - `1`: 초기 조회 실패(계정·인증 오류) 또는 인자 오류
+- **한계**:
+  - 세션을 닫으면 백그라운드 대기 프로세스도 함께 멈춘다.
+  - 백그라운드 명령 종료 시 자동 웨이크업을 지원하지 않는 호스트(Codex 등)에서는 동기로 기다리는 용도로만 쓰인다.
 
 ## 회신/발송 — 승인 필수
 1. 대상 메시지를 `read`로 파악.
