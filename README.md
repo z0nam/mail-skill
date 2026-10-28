@@ -25,6 +25,7 @@
 | `scripts/mail-watch.py` | 새 메일/회신 폴링 대기(`mailskill watch` 백엔드, bash/ps1 공용) |
 | `scripts/compose-mime.py` | raw MIME 메시지 조립 및 답장 헤더 자동 완성(bash/ps1 공용) |
 | `scripts/dup-guard.py` | 보낸편지함 최근 발송 중복 가드(bash/ps1 공용) |
+| `scripts/attachment-export.py` | raw EML 첨부파일 추출 및 무결성 검증(이슈 #9, bash/ps1 공용) |
 | `config/config.sample.toml`, `config/mbsyncrc.sample` | 템플릿 |
 
 ## 설치 (macOS 예)
@@ -63,6 +64,7 @@ mailskill search <acct> <query...>     # IMAP 쿼리 검색
 mailskill read   <acct> <id> [folder]  # 메시지 읽기
 mailskill reply  <acct> <id>           # 회신 초안 (대화형 $EDITOR)
 mailskill send   <acct> [옵션...]      # 메일 발송/비대화형 답장 (미리보기 기본, --send 로 실전송)
+mailskill attachment <acct> <id> [dir] # 첨부파일 다운로드 (무결성 검증, 이슈 #9)
 mailskill watch  <acct> [옵션...]      # 새 메일/회신 폴링 대기 (도착 exit 0, 만료 exit 2)
 ```
 

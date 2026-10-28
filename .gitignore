@@ -14,6 +14,10 @@ age-key.txt
 .DS_Store
 *.swp
 
+# Python
+__pycache__/
+*.py[cod]
+
 # ── 커밋되는 것(주의): config/config.toml(비번 없음, mail-secret 참조),
 #    secrets/secrets.age(age 암호화), secrets/recipients.txt(공개키) — 모두 안전.
 

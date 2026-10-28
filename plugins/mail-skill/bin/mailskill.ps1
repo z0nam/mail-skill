@@ -7,6 +7,7 @@
 #   mailskill read    <acct> <id> [folder] 메시지 읽기 (JSON)
 #   mailskill reply   <acct> <id>          회신(초안) — 발송 전 사용자 승인 필수
 #   mailskill send    <acct> [옵션]        메일 발송/답장(첨부 가능) — 기본 미리보기, --send 로 실전송
+#   mailskill attachment <acct> <id> [dir] 첨부파일 다운로드 (무결성 검증)
 #   mailskill watch   <acct> [옵션]        새 메일 폴링 대기 (도착 exit 0, 시간초과 exit 2)
 #   mailskill doctor  <acct>               백엔드/계정 상태 점검
 #
@@ -76,7 +77,7 @@ function Invoke-Json([string[]]$BackendArgs) {
 # 사용법은 이 파일 맨 위 계약 주석에서 뽑는다 — 두 군데에 적어두면 갈라진다.
 # -ToErr: 사용법을 stderr 로(무동사=사용법 에러 경로용, bash 판과 동일).
 function Show-Usage([switch]$ToErr) {
-    $lines = @('usage: mailskill {accounts|folders|list|search|read|reply|watch|doctor} ...', '')
+    $lines = @('usage: mailskill {accounts|folders|list|search|read|reply|send|attachment|watch|doctor} ...', '')
     $lines += Get-Content -LiteralPath $PSCommandPath |
         Where-Object { $_ -match '^#   mailskill ' } |
         ForEach-Object { $_ -replace '^#   ', '  ' }
@@ -330,6 +331,50 @@ switch ($cmd) {
         }
         finally {
             if ($stdinTmp) { Remove-Item -LiteralPath $stdinTmp -ErrorAction SilentlyContinue }
+        }
+    }
+    'attachment' {
+        $acct = Req $rest[0] 'account'
+        $id = Req $rest[1] 'id'
+        $q = Tail $rest 2
+        $foldArgs = @()
+        $outDir = '.'
+        $i = 0
+        while ($i -lt $q.Count) {
+            if ($q[$i] -eq '-f') {
+                $foldArgs = @('-f', (Req $q[$i + 1] 'folder'))
+                $i += 2
+            } else {
+                $outDir = $q[$i]
+                $i += 1
+            }
+        }
+
+        $tmpDir = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), [System.Guid]::NewGuid().ToString())
+        [System.IO.Directory]::CreateDirectory($tmpDir) | Out-Null
+        $tmpEml = [System.IO.Path]::Combine($tmpDir, 'raw.eml')
+        $errFile = [System.IO.Path]::GetTempFileName()
+
+        try {
+            $exportArgs = @('message', 'export', $id, '-a', $acct) + $foldArgs + @('--full', '-d', $tmpEml)
+            & $H @exportArgs 2>$errFile
+            $rc = $LASTEXITCODE
+            $errText = Get-Content -Raw -LiteralPath $errFile -ErrorAction SilentlyContinue
+            if ($rc -ne 0) {
+                if ($errText) { [Console]::Error.Write($errText) }
+                Fail "mailskill attachment: raw eml 내보내기 실패 (exit $rc)" $rc
+            }
+
+            $py = Get-PythonExe
+            $env:PYTHONIOENCODING = 'utf-8'
+            $exportPy = Join-Path $REPO 'scripts\attachment-export.py'
+            & $py $exportPy '--eml' $tmpEml '--dir' $outDir
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            exit 0
+        }
+        finally {
+            Remove-Item -LiteralPath $errFile -ErrorAction SilentlyContinue
+            Remove-Item -Recurse -Force -LiteralPath $tmpDir -ErrorAction SilentlyContinue
         }
     }
     'doctor' {

@@ -23,6 +23,7 @@ mailskill read   <acct> <id> [folder]   # 메시지 읽기
 mailskill folders <acct>                # 폴더 목록
 mailskill reply  <acct> <id>            # 회신 초안 (대화형 $EDITOR)
 mailskill send   <acct> [옵션...]       # 메일 발송/비대화형 답장 (미리보기 기본, --send 로 실전송)
+mailskill attachment <acct> <id> [dir]  # 첨부파일 다운로드 (비표준 헤더 복원 및 무결성 검증)
 mailskill watch  <acct> [옵션...]       # 새 메일/회신 폴링 대기 (별칭: mail-watch)
 ```
 멀티계정 횡단 검색은 `mailskill accounts`로 이름을 얻어 각 계정에 `search`를 돌리고 합친다.
@@ -116,6 +117,21 @@ mailskill send ji --to user@example.com --subject "자료 송부" --body-file ./
 2. **중복 발송 가드**: `--send` 실행 직전 보낸편지함에서 최근 10분(기본) 내 **동일 수신자 + 동일 제목** 메일이 감지되면 발송을 차단(exit 3)하고 경고를 출력한다. 의도적인 재발송은 `--force` 플래그를 추가한다.
 3. **APPEND-UID 오류 안전 처리**: 네이버웍스(`ji`) 등 일부 IMAP/SMTP 서버에서 SMTP 전송 성공 후 보낸편지함 저장 단계에서 `cannot find UID of appended IMAP message` 오류로 비정상 종료되는 현상이 있다. 메일은 이미 수신자에게 전송되었으므로, `mailskill send`는 이를 **발송 성공(보낸함 저장 확인 실패)으로 자동 분류하여 exit 0**으로 종료하고 "재시도 금지" 경고를 출력한다 (에이전트가 실패로 오인해 재전송하는 버그 원천 방지).
 4. **한글 제목 RFC 2047 인코딩 보호**: `compose-mime.py`(파이썬 표준 라이브러리)를 통해 MIME을 조립하므로, 3바이트 UTF-8 한글 글자가 인코딩 단어 경계에서 쪼개지는 깨짐 현상이 발생하지 않는다.
+
+## 첨부파일 다운로드 (`mailskill attachment`)
+메일의 첨부파일을 내려받을 때는 **himalaya attachment download 를 쓰지 말고 반드시 `mailskill attachment`**를 사용한다.
+
+> **이유 (이슈 #9)**: 일부 발신 서버(행정메일 등)가 생성한 접힌 `Content-Type:` 헤더나 따옴표 안 RFC 2047 인코딩 파일명을 himalaya(`mail-parser`)가 텍스트로 오인해 바이너리(xlsx, docx 등)를 UTF-8 손실 변환으로 깨뜨리는 업스트림 버그가 있다. `mailskill attachment` 는 raw EML 을 내려받아 파이썬 `email`(policy.default)로 파싱하여 정상 복원하고, zip 계열(`xlsx`/`docx`/`hwpx`/`pptx`)은 `zipfile.testzip()`, 그 외는 크기 대조로 무결성을 검증한다.
+
+```sh
+# 1) 현재 디렉토리에 첨부파일 다운로드
+mailskill attachment ji 11127
+
+# 2) 특정 폴더의 메일에서 특정 디렉토리로 다운로드
+mailskill attachment ji 11127 -f "Archive" ./downloads
+```
+- zip 계열 파일(`xlsx`, `docx`, `hwpx`, `pptx`, `zip`)은 저장 후 즉시 아카이브 무결성을 검증하여 손상된 파일이 저장되는 것을 방지한다.
+- Windows 환경을 위해 파일명 내 금칙 문자(`\ / : * ? " < > |`) 및 예약어 충돌을 자동 새니타이즈한다.
 
 ## 시크릿 (age, 선택적 멀티머신)
 비번은 `secrets/secrets.age`(age 암호화)에 있고 `auth.cmd = "mail-secret <name>"`가 복호화 공급. 기계별 키 `~/.config/mail-skill/age-key.txt`. macOS/Linux 공통. 디버그: `mail-secret <name>`.
