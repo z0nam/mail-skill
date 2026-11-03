@@ -2,9 +2,11 @@
 # bash 판 scripts/secret-set 과 동일. 값은 인자로 받지 않는다(히스토리/노출 방지).
 #   secret-set <name>           # 숨김 프롬프트로 입력
 #   secret-set <name> --stdin   # stdin 에서 값 1줄 읽음 (파이프용)
+#   & secret-set.ps1 -Name <name> -SecureValue <SecureString>   # 같은 프로세스에서(mail-setup.ps1)
 param(
     [Parameter(Mandatory = $true, Position = 0)][string]$Name,
-    [Parameter(Position = 1)][string]$Mode = 'prompt'
+    [Parameter(Position = 1)][string]$Mode = 'prompt',
+    [System.Security.SecureString]$SecureValue
 )
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
@@ -23,15 +25,18 @@ if (-not (Test-Path -LiteralPath $recip) -or ((Get-Item -LiteralPath $recip).Len
     [Console]::Error.WriteLine('recipients.txt 비어있음 — 공개키 등록 먼저(bootstrap.ps1)'); exit 1
 }
 
-# 값 입력: --stdin 이면 한 줄, 아니면 숨김 프롬프트.
-if ($Mode -eq '--stdin') {
+# 값 입력: -SecureValue 가 오면 그것, --stdin 이면 한 줄, 아니면 숨김 프롬프트.
+# -SecureValue 는 평문을 파이프·인자로 넘기지 않으려고 둔다(호출측이 같은 프로세스).
+if ($SecureValue) {
+    $val = (New-Object System.Net.NetworkCredential('', $SecureValue)).Password
+}
+elseif ($Mode -eq '--stdin') {
     $val = [Console]::In.ReadLine()
 }
 else {
-    [Console]::Error.Write("value for ${Name}: ")
-    $sec = Read-Host -AsSecureString
+    . (Join-Path $scriptDir 'read-masked.ps1')
+    $sec = Read-MaskedSecure "value for ${Name}"
     $val = (New-Object System.Net.NetworkCredential('', $sec)).Password
-    [Console]::Error.WriteLine('')
 }
 if (-not $val) { [Console]::Error.WriteLine('빈 값 거부'); exit 1 }
 

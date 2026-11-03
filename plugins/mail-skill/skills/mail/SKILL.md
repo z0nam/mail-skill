@@ -136,6 +136,9 @@ mailskill attachment ji 11127 -f "Archive" ./downloads
 ## 시크릿 (age, 선택적 멀티머신)
 비번은 `secrets/secrets.age`(age 암호화)에 있고 `auth.cmd = "mail-secret <name>"`가 복호화 공급. 기계별 키 `~/.config/mail-skill/age-key.txt`. macOS/Linux 공통. 디버그: `mail-secret <name>`.
 
+## 회사메일 첫 설정 (`mailskill setup`) — 사용자가 직접 실행
+회사메일(NAVER WORKS) 계정이 아직 없거나 `mailskill doctor ji` 가 인증 실패면, 사용자에게 **직접 연 터미널(Windows: PowerShell 창)** 에서 `mailskill setup` 을 실행하라고 안내한다. 앱 비밀번호를 숨김 입력으로 받으므로 **에이전트가 대신 실행하지 않는다**(입력이 리다이렉트되면 exit 2 로 멈춘다). 비밀번호를 채팅으로 받지도 않는다. 앱 비밀번호 발급 절차: `docs/naver-works-app-password.md`. exit 0 완료 · 1 런타임 없음(→ `jaix setup`) · 2 사용법/터미널 아님 · 3 저장됐지만 로그인 실패.
+
 ## 트러블슈팅
 > ⚠️ **`MAILSKILL_LOG=trace` 는 IMAP `AUTHENTICATE PLAIN` 줄을 그대로 찍는다** —
 > 계정 비밀번호가 base64 로 로그에 남는다. 공유되는 터미널·트랜스크립트에서 쓰지 말 것.

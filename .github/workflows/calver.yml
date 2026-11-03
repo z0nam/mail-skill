@@ -1,0 +1,6 @@
+on: { push: { branches: [main] } }
+concurrency: calver-tag
+jobs:
+  tag:
+    uses: jeju-inst/jaix-kit/.github/workflows/calver-tag.yml@be2b7e860110dd065b8f86b3c0f9f3f07f736fe9
+    permissions: { contents: write }

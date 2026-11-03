@@ -14,14 +14,14 @@ $CLAUDE_SKILLS_DIR = "$env:USERPROFILE\.claude\skills"
 $CODEX_SKILLS_DIR = "$env:USERPROFILE\.codex\skills"
 $KEY_PATH = "$MAIL_SKILL_DIR\age-key.txt"
 
-# 2) 의존성 확인 (himalaya, age, age-keygen, python)
-#    python 은 날짜검색 클라이언트측 폴백(scripts/date-search.py)에 쓰인다 — 없어도
-#    대부분 동작하지만, 네이버웍스류 서버의 날짜검색이 조용히 0건일 때 폴백이 안 된다.
-Write-Host "1. 의존성 점검..." -ForegroundColor Cyan
+# 2) 의존성 확인 (himalaya, age, age-keygen, uv/python)
+#    send·watch·attachment 에 python 필수. 런타임은 스스로 설치하지 않고(TS-RUNTIME-2)
+#    jaix setup(또는 사용자가 uv/python)이 제공한다.
+Write-Host "1. 의존성 점검 (선언만, 자가설치 안 함 — TS-RUNTIME-2)..." -ForegroundColor Cyan
 $deps = @("himalaya", "age", "age-keygen")
 foreach ($dep in $deps) {
     if (-not (Get-Command $dep -ErrorAction SilentlyContinue)) {
-        Write-Warning "⚠ '$dep' 이(가) PATH에 없습니다. scoop, winget 또는 manual 설치가 필요합니다."
+        Write-Warning "⚠ '$dep' 이(가) PATH에 없습니다. (선언만, 자가설치 안 함 — jaix setup 또는 winget/scoop 필요)"
         if ($dep -eq "himalaya") {
             Write-Host "   -> winget install pimalaya.himalaya  또는  scoop install himalaya" -ForegroundColor Gray
         } elseif ($dep -like "age*") {
@@ -29,9 +29,9 @@ foreach ($dep in $deps) {
         }
     }
 }
-if (-not (Get-Command python -ErrorAction SilentlyContinue) -and -not (Get-Command python3 -ErrorAction SilentlyContinue)) {
-    Write-Warning "⚠ 'python' 이(가) PATH에 없습니다(선택). 날짜검색 폴백에만 필요합니다."
-    Write-Host "   -> winget install Python.Python.3.12  또는  scoop install python" -ForegroundColor Gray
+if (-not (Get-Command uv -ErrorAction SilentlyContinue) -and -not (Get-Command python -ErrorAction SilentlyContinue) -and -not (Get-Command python3 -ErrorAction SilentlyContinue)) {
+    Write-Warning "⚠ 'uv'(또는 python 3.12)이 PATH에 없습니다. send·watch·attachment에 필수이며, 런타임은 스스로 설치하지 않고(TS-RUNTIME-2) jaix setup(또는 사용자가 uv/python)이 제공합니다."
+    Write-Host "   -> winget install astral-sh.uv  또는  winget install Python.Python.3.12" -ForegroundColor Gray
 }
 
 # 3) age 키 생성
@@ -41,18 +41,21 @@ if (-not (Test-Path $MAIL_SKILL_DIR)) {
 }
 
 if (-not (Test-Path $KEY_PATH)) {
-    if (Get-Command age-keygen -ErrorAction SilentlyContinue) {
+    if ((Get-Command age-keygen -ErrorAction SilentlyContinue)) {
         age-keygen -o $KEY_PATH
         Write-Host "개인키 생성 완료: $KEY_PATH" -ForegroundColor Green
     } else {
-        Write-Error "age-keygen 명령어를 실행할 수 없어 age 키를 생성하지 못했습니다."
+        Write-Warning "age-keygen 명령어를 실행할 수 없어 age 키를 생성하지 못했습니다."
     }
 } else {
     Write-Host "기존 age 개인키가 존재합니다: $KEY_PATH" -ForegroundColor Yellow
 }
 
-$PUB = & age-keygen -y $KEY_PATH
-$PUB = $PUB.Trim()
+$PUB = if ((Get-Command age-keygen -ErrorAction SilentlyContinue) -and (Test-Path $KEY_PATH)) {
+    (& age-keygen -y $KEY_PATH).Trim()
+} else {
+    "(age-keygen 없음 — age 설치 후 생성 필요)"
+}
 
 # 4) 심링크 설정
 Write-Host "`n3. 설정 파일 및 스킬 심링크 구성..." -ForegroundColor Cyan

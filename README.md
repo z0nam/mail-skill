@@ -21,7 +21,6 @@
 | `bin/*.cmd` (`mailskill`/`mail-secret`/`secret-set`) | Windows PATH 에서 bare 이름으로 부르는 shim |
 | `scripts/bootstrap.ps1` | Windows 셋업(deps 안내 + age 키 + 심링크/복사) |
 | `scripts/convert-local.py` | Apple Mail 로컬(.emlx) → Maildir 일괄 변환(읽기/검색용) |
-| `scripts/sent-to-dayone.py` | 특정 Maildir의 보낸메일 → Day One 저널(작성시각 보존) |
 | `scripts/mail-watch.py` | 새 메일/회신 폴링 대기(`mailskill watch` 백엔드, bash/ps1 공용) |
 | `scripts/compose-mime.py` | raw MIME 메시지 조립 및 답장 헤더 자동 완성(bash/ps1 공용) |
 | `scripts/dup-guard.py` | 보낸편지함 최근 발송 중복 가드(bash/ps1 공용) |

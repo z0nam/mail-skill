@@ -7,22 +7,33 @@ _self="$0"; while [ -L "$_self" ]; do _t="$(readlink "$_self")"; case "$_t" in /
 REPO="${MAIL_SKILL_REPO:-$(cd "$(dirname "$_self")/.." && pwd)}"
 cd "$REPO"
 
-# 1) 의존성
+# 1) 의존성 확인 (선언만, 자가설치 안 함 — TS-RUNTIME-2)
 if [ "$(uname)" = "Darwin" ]; then
-  command -v brew >/dev/null || { echo "Homebrew 필요: https://brew.sh"; exit 1; }
-  for p in himalaya age; do command -v "$p" >/dev/null || brew install "$p"; done
   BINDIR="/opt/homebrew/bin"; [ -d "$BINDIR" ] || BINDIR="/usr/local/bin"
 else
-  for p in himalaya age; do command -v "$p" >/dev/null || echo "⚠ '$p' 설치 필요 (apt install $p / cargo install $p)"; done
   BINDIR="$HOME/.local/bin"; mkdir -p "$BINDIR"
+fi
+
+for p in himalaya age; do
+  if ! command -v "$p" >/dev/null 2>&1; then
+    echo "⚠ '$p' 설치 필요 (선언만, 자가설치 안 함 — brew install $p 또는 apt install $p / cargo install $p)"
+  fi
+done
+
+if ! command -v uv >/dev/null 2>&1 && ! command -v python3 >/dev/null 2>&1 && ! command -v python >/dev/null 2>&1; then
+  echo "⚠ Python 필요: send·watch·attachment에 필수이며, 런타임은 스스로 설치하지 않고(TS-RUNTIME-2) jaix setup(또는 사용자가 uv/python)이 제공합니다."
 fi
 
 # 2) age 키 (기계별, 절대 동기화 안 함)
 # 경로는 리졸버(mail-secret)·README 와 일치해야 한다: mail-skill (과거 mail-mcp 였음).
 mkdir -p "$HOME/.config/mail-skill"
 KEY="$HOME/.config/mail-skill/age-key.txt"
-[ -f "$KEY" ] || { age-keygen -o "$KEY"; chmod 600 "$KEY"; }
-PUB="$(age-keygen -y "$KEY")"
+if command -v age-keygen >/dev/null 2>&1; then
+  [ -f "$KEY" ] || { age-keygen -o "$KEY"; chmod 600 "$KEY"; }
+  PUB="$(age-keygen -y "$KEY")"
+else
+  PUB="(age-keygen 없음 — age 설치 후 다시 실행 필요)"
+fi
 
 # 3) 심링크: himalaya config / mail 스킬 / mail-secret(PATH)
 mkdir -p "$HOME/.config/himalaya" "$HOME/.claude/skills"

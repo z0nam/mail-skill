@@ -10,6 +10,7 @@
 #   mailskill attachment <acct> <id> [dir] 첨부파일 다운로드 (무결성 검증)
 #   mailskill watch   <acct> [옵션]        새 메일 폴링 대기 (도착 exit 0, 시간초과 exit 2)
 #   mailskill doctor  <acct>               백엔드/계정 상태 점검
+#   mailskill setup   [옵션]               회사메일 1회 설정(앱비번 숨김입력·암호화저장·설정생성·로그인확인)
 #
 # stdout 계약: JSON 동사(accounts/folders/list/search/read)는 stdout 에 JSON 만 낸다.
 # 진단·경고·에러는 전부 stderr. 백엔드 로그는 애초에 끈다.
@@ -39,11 +40,48 @@ function Tail([string[]]$a, [int]$start) {
     return , @($a[$start..($a.Count - 1)])
 }
 
+function Get-PythonCmd {
+    # uv 및 uv 관리 Python 3.12 우선 실행:
+    # --no-project: 현재/상위 디렉터리의 pyproject.toml 탐색 및 .venv 생성 방지
+    # -q: stderr 로그 억제로 strict JSON 계약 보호
+    # --no-python-downloads: 앱 내부 다운로드 차단(TS-RUNTIME-2 및 MSIX 가상화 보호)
+    if (Get-Command uv -ErrorAction SilentlyContinue) {
+        $prevEap = $ErrorActionPreference
+        try {
+            # PS 5.1 은 네이티브 stderr 를 종료 에러(terminating error)로 승격할 수 있으므로
+            # 3.12 미설치 프로브 실패 시 안전하게 폴백하기 위해 EAP 를 일시 완화한다.
+            $ErrorActionPreference = 'Continue'
+            $null = & uv python find 3.12 2>$null
+            if ($LASTEXITCODE -eq 0) {
+                return , @('uv', 'run', '--no-project', '-q', '--no-python-downloads', '--python', '3.12')
+            }
+        }
+        finally {
+            $ErrorActionPreference = $prevEap
+        }
+    }
+    foreach ($p in @('python3', 'python')) {
+        if (Get-Command $p -ErrorAction SilentlyContinue) {
+            return , @($p)
+        }
+    }
+    Fail 'mailskill: uv 또는 python(3)을 찾을 수 없습니다' 1
+}
+
+function Invoke-Python {
+    $cmd = Get-PythonCmd
+    $exe = $cmd[0]
+    $prefix = Tail $cmd 1
+    $allArgs = @($prefix) + @($args)
+    & $exe @allArgs
+}
+
 function Get-PythonExe {
+    # 구버전 호환용 (단일 실행파일 이름 반환)
     foreach ($p in @('python3', 'python')) {
         if (Get-Command $p -ErrorAction SilentlyContinue) { return $p }
     }
-    Fail 'mailskill: python 을 찾을 수 없습니다 (date-search 폴백 불가)' 1
+    Fail 'mailskill: python 을 찾을 수 없습니다' 1
 }
 
 # json_verb 등가 — JSON 동사 공통 래퍼.
@@ -77,7 +115,7 @@ function Invoke-Json([string[]]$BackendArgs) {
 # 사용법은 이 파일 맨 위 계약 주석에서 뽑는다 — 두 군데에 적어두면 갈라진다.
 # -ToErr: 사용법을 stderr 로(무동사=사용법 에러 경로용, bash 판과 동일).
 function Show-Usage([switch]$ToErr) {
-    $lines = @('usage: mailskill {accounts|folders|list|search|read|reply|send|attachment|watch|doctor} ...', '')
+    $lines = @('usage: mailskill {accounts|folders|list|search|read|reply|send|attachment|watch|doctor|setup} ...', '')
     $lines += Get-Content -LiteralPath $PSCommandPath |
         Where-Object { $_ -match '^#   mailskill ' } |
         ForEach-Object { $_ -replace '^#   ', '  ' }
@@ -89,8 +127,12 @@ function Show-Usage([switch]$ToErr) {
 $cmd = if ($args.Count -ge 1) { $args[0] } else { '' }
 $rest = Tail $args 1
 if ($cmd -eq 'watch') {
-    $py = Get-PythonExe
-    & $py (Join-Path $REPO 'scripts\mail-watch.py') @rest
+    Invoke-Python (Join-Path $REPO 'scripts\mail-watch.py') @rest
+    exit $LASTEXITCODE
+}
+# setup 은 자기 --help 를 가진다. 같은 프로세스에서 불러야 Read-Host 숨김 입력이 이 콘솔을 쓴다.
+if ($cmd -eq 'setup') {
+    & (Join-Path $REPO 'scripts\mail-setup.ps1') @rest
     exit $LASTEXITCODE
 }
 # 명시적 help(동사 -h/--help/help, 또는 <동사> -h/--help) → 사용법 후 exit 0.
@@ -164,8 +206,7 @@ switch ($cmd) {
             }
             if ($pure -and $dargs.Count -gt 0) {
                 if ($env:MAILSKILL_LOG) { [Console]::Error.WriteLine('mailskill: 서버측 날짜 검색 0건 → 클라이언트측 재확인') }
-                $py = Get-PythonExe
-                $fb = & $py (Join-Path $REPO 'scripts\date-search.py') $acct $foldName @dargs
+                $fb = Invoke-Python (Join-Path $REPO 'scripts\date-search.py') $acct $foldName @dargs
                 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
                 Emit (@($fb) -join "`n"); exit 0
             }
@@ -238,7 +279,6 @@ switch ($cmd) {
             $config = if ($env:HIMALAYA_CONFIG) { $env:HIMALAYA_CONFIG } else { Join-Path $HOME '.config\himalaya\config.toml' }
             if (-not (Test-Path $config)) { $config = Join-Path $REPO 'config\config.toml' }
 
-            $py = Get-PythonExe
             $composePy = Join-Path $REPO 'scripts\compose-mime.py'
             $dupGuardPy = Join-Path $REPO 'scripts\dup-guard.py'
 
@@ -254,7 +294,7 @@ switch ($cmd) {
             foreach ($att in $attach) { $cargs += @('--attach', $att) }
 
             # 1. 메타데이터 조회
-            $metaJson = & $py @cargs @('--dump-meta')
+            $metaJson = Invoke-Python @cargs @('--dump-meta')
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             $metaText = (@($metaJson) -join "`n")
             $meta = $metaText | ConvertFrom-Json
@@ -267,7 +307,7 @@ switch ($cmd) {
             if (-not $dosend) {
                 $dupWarn = 0
                 if (-not $force) {
-                    $null = & $py $dupGuardPy --account $acct --to $metaTo --subject $metaSubj --window $dupwindow --config $config --himalaya-bin $H 2>$null
+                    $null = Invoke-Python $dupGuardPy --account $acct --to $metaTo --subject $metaSubj --window $dupwindow --config $config --himalaya-bin $H 2>$null
                     $dupWarn = $LASTEXITCODE
                 }
                 Emit '── mailskill send 미리보기 (실전송하려면 동일 명령에 --send 추가) ──'
@@ -298,7 +338,7 @@ switch ($cmd) {
             # 3. 실전송
             # 중복 발송 가드: --force 가 아닐 때 보낸편지함 검사
             if (-not $force) {
-                & $py $dupGuardPy --account $acct --to $metaTo --subject $metaSubj --window $dupwindow --config $config --himalaya-bin $H
+                Invoke-Python $dupGuardPy --account $acct --to $metaTo --subject $metaSubj --window $dupwindow --config $config --himalaya-bin $H
                 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             }
 
@@ -307,7 +347,7 @@ switch ($cmd) {
             $tmpMime = [System.IO.Path]::GetTempFileName()
             $errFile = [System.IO.Path]::GetTempFileName()
             try {
-                & $py @cargs @('-o', $tmpMime)
+                Invoke-Python @cargs @('-o', $tmpMime)
                 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
                 cmd /c "`"$H`" message send -a `"$acct`" < `"$tmpMime`" 2>`"$errFile`""
                 $rc = $LASTEXITCODE
@@ -365,10 +405,9 @@ switch ($cmd) {
                 Fail "mailskill attachment: raw eml 내보내기 실패 (exit $rc)" $rc
             }
 
-            $py = Get-PythonExe
             $env:PYTHONIOENCODING = 'utf-8'
             $exportPy = Join-Path $REPO 'scripts\attachment-export.py'
-            & $py $exportPy '--eml' $tmpEml '--dir' $outDir
+            Invoke-Python $exportPy '--eml' $tmpEml '--dir' $outDir
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             exit 0
         }
