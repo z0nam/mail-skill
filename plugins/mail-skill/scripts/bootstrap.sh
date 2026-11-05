@@ -40,7 +40,7 @@ mkdir -p "$HOME/.config/himalaya" "$HOME/.claude/skills"
 ln -sfn "$REPO/config/config.toml"      "$HOME/.config/himalaya/config.toml"
 ln -sfn "$REPO/.claude/skills/mail"     "$HOME/.claude/skills/mail"
 ln -sfn "$REPO/scripts/mail-secret"     "$BINDIR/mail-secret"
-ln -sfn "$REPO/bin/mailskill"            "$BINDIR/mailskill"
+ln -sfn "$REPO/cli/mailskill"            "$BINDIR/mailskill"
 ln -sfn "$REPO/scripts/mail-watch.py"    "$BINDIR/mail-watch"
 echo "심링크 완료: himalaya config, mail 스킬, mail-secret/mailskill/mail-watch($BINDIR)"
 

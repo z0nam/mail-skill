@@ -1,4 +1,4 @@
-﻿# mailskill (Windows / PowerShell) — 엔진 중립 어댑터. bin/mailskill(bash) 과 동일 계약.
+﻿# mailskill (Windows / PowerShell) — 엔진 중립 어댑터. cli/mailskill(bash) 과 동일 계약.
 #
 #   mailskill accounts                     계정 목록 (JSON)
 #   mailskill folders <acct>               폴더 목록 (JSON)

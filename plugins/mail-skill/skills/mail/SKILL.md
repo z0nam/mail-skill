@@ -5,7 +5,7 @@ description: Search, read, watch for new messages/replies, and draft replies to 
 
 # mailskill — 멀티계정 메일 (엔진 중립 어댑터)
 
-여러 메일 계정을 검색·읽기·수신 대기·회신초안 작성. **`mailskill` 어댑터**(`bin/mailskill`)를 통해 호출한다 — 백엔드는 현재 [Himalaya](https://github.com/pimalaya/himalaya)지만 어댑터 뒤에 숨어 있어 엔진을 바꿔도 사용법은 동일하다.
+여러 메일 계정을 검색·읽기·수신 대기·회신초안 작성. **`mailskill` 어댑터**(`cli/mailskill`)를 통해 호출한다 — 백엔드는 현재 [Himalaya](https://github.com/pimalaya/himalaya)지만 어댑터 뒤에 숨어 있어 엔진을 바꿔도 사용법은 동일하다.
 
 ## 라우팅 (세 갈래)
 - **주 Gmail 1계정**(설정의 `gmail` 계정) → OAuth Gmail 커넥터가 호스트에 있으면 사용(예: Claude/Codex Gmail connector). 커넥터가 노출되지 않았거나 재인증이 필요하면 사용자에게 연결/재인증을 안내한다. 앱비번이 없어 `mailskill`로는 못 붙으니, 커넥터를 쓸 수 없는 호스트에선 다른 계정으로 안내.

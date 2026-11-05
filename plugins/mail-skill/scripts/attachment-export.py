@@ -9,7 +9,7 @@ email.policy.default 를 사용해 비표준 헤더를 복원하고,
 암호화된 OOXML(OLE CFB) 및 암호화된 ZIP 아카이브를 정상 보존하며,
 중첩 multipart, multipart/related 인라인 파일, message/rfc822 첨부를 지원한다.
 검증 실패 파일은 즉시 삭제하여 손상된 파일이 저장되지 않도록 방지한다.
-bash(bin/mailskill)와 PowerShell(bin/mailskill.ps1) 양쪽 어댑터가 공통 호출한다.
+bash(cli/mailskill)와 PowerShell(cli/mailskill.ps1) 양쪽 어댑터가 공통 호출한다.
 """
 import argparse
 import email

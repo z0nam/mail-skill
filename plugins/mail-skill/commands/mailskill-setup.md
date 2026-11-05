@@ -17,7 +17,7 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/check-deps.sh"
 ```sh
 BINDIR=/opt/homebrew/bin; [ -d "$BINDIR" ] || BINDIR=/usr/local/bin
 [ "$(uname)" = Darwin ] || { BINDIR="$HOME/.local/bin"; mkdir -p "$BINDIR"; }
-ln -sfn "${CLAUDE_PLUGIN_ROOT}/bin/mailskill"     "$BINDIR/mailskill"
+ln -sfn "${CLAUDE_PLUGIN_ROOT}/cli/mailskill"     "$BINDIR/mailskill"
 ln -sfn "${CLAUDE_PLUGIN_ROOT}/scripts/mail-secret" "$BINDIR/mail-secret"
 ```
 
@@ -57,4 +57,4 @@ mailskill list <account> 5
 ## 참고
 - 시크릿 저장: `~/.config/mail-skill/secrets.age`(age 암호화) + 기계별 키. 평문 없음.
 - 과거 메일을 로컬에서 끌어와 검색하려면 `scripts/convert-local.py`(Apple Mail → Maildir) 참고.
-- 엔진(Himalaya)을 바꾸려면 `bin/mailskill` 한 파일만 재구현.
+- 엔진(Himalaya)을 바꾸려면 `cli/mailskill` 한 파일만 재구현.

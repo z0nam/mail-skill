@@ -33,7 +33,7 @@ mailskill reply  <acct> <id>        # 회신 초안 (발송은 사용자 승인 
 Himalaya 라이브 접속은 계정마다 2단계인증+앱비번 필요. 주 Gmail 1개는 호스트가 제공하는 Gmail connector(OAuth; Claude/Codex 등)로, 과거 메일은 `scripts/convert-local.py`(Apple Mail 로컬 → Maildir, 읽기 전용)로 붙일 수 있습니다.
 
 ## 엔진 교체
-`mailskill` 은 얇은 어댑터입니다. 더 나은 메일 도구로 갈아타면 `bin/mailskill` **한 파일만** 다시 구현하면 스킬·계약은 그대로.
+`mailskill` 은 얇은 어댑터입니다. 더 나은 메일 도구로 갈아타면 `cli/mailskill` **한 파일만** 다시 구현하면 스킬·계약은 그대로.
 
 ## 크레딧 / 라이선스
 메일 엔진 [Himalaya](https://github.com/pimalaya/himalaya) by pimalaya — 감사합니다. MIT.

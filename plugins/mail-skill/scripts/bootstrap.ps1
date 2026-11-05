@@ -99,7 +99,7 @@ Write-Host "→ 타 기계의 secrets/recipients.txt에 추가하고 'scripts/se
 Write-Host "  그 후 이 기계에서 git pull을 받으면 암호화된 기밀 조회가 가능합니다." -ForegroundColor Gray
 
 Write-Host "`n── PATH 설정 (필수) ──" -ForegroundColor Green
-Write-Host "  bin\ 에 mailskill.cmd / mail-secret.cmd / secret-set.cmd shim 이 있습니다." -ForegroundColor Gray
+Write-Host "  cli\ 에 mailskill.cmd / mail-secret.cmd / secret-set.cmd shim 이 있습니다." -ForegroundColor Gray
 Write-Host "  이 경로를 PATH 에 넣어야 'mailskill' 과, Himalaya auth.cmd 의 'mail-secret' 이 동작합니다:" -ForegroundColor Gray
-Write-Host "    setx PATH `"`$env:PATH;$REPO\bin`"   # 새 터미널부터 적용" -ForegroundColor White
+Write-Host "    setx PATH `"`$env:PATH;$REPO\cli`"   # 새 터미널부터 적용" -ForegroundColor White
 Write-Host "  확인:  mailskill accounts" -ForegroundColor Gray
