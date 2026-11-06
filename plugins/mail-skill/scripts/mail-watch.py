@@ -156,7 +156,7 @@ def fetch_page(acct, folder, size):
         cmd += ["-f", folder]
     cmd += ["--page-size", str(size), "-o", "json"]
     try:
-        p = subprocess.run(cmd, capture_output=True, text=True, env=env)
+        p = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", env=env)
     except FileNotFoundError:
         raise RuntimeError(f"백엔드 '{hbin}' 를 PATH 에서 찾을 수 없습니다")
     if p.returncode != 0:
@@ -441,4 +441,12 @@ def main():
 
 
 if __name__ == "__main__":
+    # 출력도 UTF-8 로 고정한다. 한글 Windows 에서 PYTHONUTF8/PYTHONIOENCODING 없이 실행되면
+    # stdout/stderr 가 cp949·cp1252 라 한글을 쓰다 UnicodeEncodeError 가 난다(어댑터 env 와 이중 안전장치).
+    for _s in (sys.stdout, sys.stderr):
+        if hasattr(_s, "reconfigure"):
+            try:
+                _s.reconfigure(encoding="utf-8", errors="backslashreplace")
+            except Exception:
+                pass
     main()

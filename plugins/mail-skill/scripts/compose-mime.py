@@ -24,6 +24,29 @@ from email.message import EmailMessage
 from pathlib import Path
 
 
+def himalaya_config_args(config_path):
+    """himalaya 에 넘길 `-c` 인자. 기본 탐색으로 같은 파일을 찾으면 `-c` 를 아예 주지 않는다.
+
+    himalaya 1.2.0 Windows 는 config 를 **절대경로로** 받으면(-c 든 HIMALAYA_CONFIG 든)
+    auth.cmd 단계에서 멈춘다(실측). 기본 탐색(~/.config/himalaya/config.toml)은 정상이고,
+    셋업은 늘 그 위치에 쓰므로 그 경우엔 `-c` 를 빼서 어댑터의 다른 동사와 같은 경로를 탄다.
+    기본 위치가 아닌 config(저장소 폴백 등)만 예전처럼 `-c` 로 명시한다.
+    """
+    if not config_path or not Path(config_path).is_file():
+        return []
+    target = Path(config_path).resolve()
+    defaults = [Path.home() / ".config" / "himalaya" / "config.toml"]
+    if os.environ.get("HIMALAYA_CONFIG"):
+        defaults.append(Path(os.environ["HIMALAYA_CONFIG"]))  # himalaya 가 env 로 스스로 읽는다
+    for d in defaults:
+        try:
+            if d.is_file() and d.resolve() == target:
+                return []
+        except OSError:
+            pass
+    return ["-c", config_path]
+
+
 def resolve_from(account, config_path):
     """himalaya config(TOML)에서 [accounts.<account>] 의 email 을 뽑는다.
     toml 라이브러리 없이 섹션 단순 스캔(어댑터가 bash/ps1 양쪽에서 파싱 안 하도록 여기 둔다)."""
@@ -49,7 +72,7 @@ def check_himalaya_bcc_safe(himalaya_bin=None):
     안전한 버전(>= 2.2.1)임이 명확히 확인되지 않으면 fail-closed 로 거부한다."""
     h_bin = himalaya_bin or os.environ.get("HIMALAYA_BIN", "himalaya")
     try:
-        res = subprocess.run([h_bin, "--version"], capture_output=True, text=True, check=False)
+        res = subprocess.run([h_bin, "--version"], capture_output=True, text=True, encoding="utf-8", errors="replace", check=False)
         if res.returncode == 0:
             m = re.search(r'(?:himalaya\s+)?v?(\d+)\.(\d+)(?:\.(\d+))?', res.stdout)
             if m:
@@ -84,11 +107,10 @@ def fetch_reply_headers(account, message_id, folder=None, config_path=None, hima
     ]
     if folder:
         cmd.extend(["-f", folder])
-    if config_path and Path(config_path).is_file():
-        cmd.extend(["-c", config_path])
+    cmd.extend(himalaya_config_args(config_path))
 
     try:
-        res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        res = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", check=False)
     except FileNotFoundError:
         sys.exit(f"compose-mime: himalaya 실행 파일('{h_bin}')을 찾을 수 없음")
 
@@ -289,4 +311,12 @@ def main():
 
 
 if __name__ == "__main__":
+    # 출력도 UTF-8 로 고정한다. 한글 Windows 에서 PYTHONUTF8/PYTHONIOENCODING 없이 실행되면
+    # stdout/stderr 가 cp949·cp1252 라 한글을 쓰다 UnicodeEncodeError 가 난다(어댑터 env 와 이중 안전장치).
+    for _s in (sys.stdout, sys.stderr):
+        if hasattr(_s, "reconfigure"):
+            try:
+                _s.reconfigure(encoding="utf-8", errors="backslashreplace")
+            except Exception:
+                pass
     main()

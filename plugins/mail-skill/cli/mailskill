@@ -21,6 +21,9 @@
 set -euo pipefail
 H="${HIMALAYA_BIN:-himalaya}"
 export RUST_LOG="${MAILSKILL_LOG:-off}"   # himalaya(tracing) 로그 억제. 에러/exit code 는 유지됨.
+# python 헬퍼의 open/stdin/stdout/subprocess 기본 인코딩을 UTF-8 로 고정한다.
+# 한글 Windows(Git Bash 포함)에선 기본이 cp949 라 himalaya 의 UTF-8 출력을 읽다 깨진다.
+export PYTHONUTF8=1 PYTHONIOENCODING=utf-8
 
 # 이 스크립트는 보통 PATH 심링크(/opt/homebrew/bin/mailskill)로 불린다.
 # 저장소의 scripts/ 를 찾으려면 심링크를 끝까지 따라가 실제 위치를 알아내야 한다.

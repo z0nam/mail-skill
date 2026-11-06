@@ -46,14 +46,31 @@ def fetch(acct, folder, size):
     if folder:
         cmd += ["-f", folder]
     cmd += ["--page-size", str(size), "-o", "json"]
-    p = subprocess.run(cmd, capture_output=True, text=True)
+    # himalaya 출력은 UTF-8 이다. text=True 만 주면 파이썬 기본 인코딩(한글 Windows=cp949)으로
+    # 디코드하다 한글에서 깨지고, Windows 에선 그 예외가 읽기 스레드에서 삼켜져 stdout 이
+    # 비고 "[] + exit 0"(조용한 오답)이 된다. 그래서 바이트로 받아 UTF-8 로 직접(엄격히) 푼다.
+    p = subprocess.run(cmd, capture_output=True)
+    stderr = p.stderr.decode("utf-8", errors="replace") if p.stderr else ""
     if p.returncode != 0:
-        # 봉투가 0통인 폴더에서 himalaya 가 "page out of bounds" 로 죽는 케이스.
-        if "out of bounds" in (p.stderr or ""):
+        # 봉투가 0통인 폴더에서 himalaya 가 "page out of bounds" 로 죽는 케이스 = 정상 빈 결과.
+        if "out of bounds" in stderr:
             return []
-        sys.stderr.write(p.stderr)
+        sys.stderr.write(stderr)
         sys.exit(f"date-search: 봉투 조회 실패 (exit {p.returncode})")
-    return json.loads(p.stdout or "[]")
+    # 여기부터의 실패는 "서버 0건"이 아니라 출력을 못 읽은 것 — 빈 결과로 삼키지 않는다.
+    try:
+        text = (p.stdout or b"").decode("utf-8")
+    except UnicodeDecodeError as e:
+        sys.exit(f"date-search: 백엔드 출력이 UTF-8 이 아님 ({e}) — 빈 결과로 처리하지 않고 실패합니다")
+    if not text.strip():
+        sys.exit("date-search: 백엔드가 성공(exit 0)했지만 출력이 비어 있음 — 빈 결과로 처리하지 않고 실패합니다")
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as e:
+        sys.exit(f"date-search: 백엔드 출력이 JSON 이 아님 ({e}) — 빈 결과로 처리하지 않고 실패합니다")
+    if not isinstance(data, list):
+        sys.exit(f"date-search: 봉투 목록(JSON 배열)이 아님: {type(data).__name__}")
+    return data
 
 
 def main():
@@ -118,4 +135,12 @@ def main():
 
 
 if __name__ == "__main__":
+    # 출력도 UTF-8 로 고정한다. 한글 Windows 에서 PYTHONUTF8/PYTHONIOENCODING 없이 실행되면
+    # stdout/stderr 가 cp949·cp1252 라 한글을 쓰다 UnicodeEncodeError 가 난다(어댑터 env 와 이중 안전장치).
+    for _s in (sys.stdout, sys.stderr):
+        if hasattr(_s, "reconfigure"):
+            try:
+                _s.reconfigure(encoding="utf-8", errors="backslashreplace")
+            except Exception:
+                pass
     main()

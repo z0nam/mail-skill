@@ -21,6 +21,29 @@ from email.utils import getaddresses, parsedate_to_datetime
 from pathlib import Path
 
 
+def himalaya_config_args(config_path):
+    """himalaya 에 넘길 `-c` 인자. 기본 탐색으로 같은 파일을 찾으면 `-c` 를 아예 주지 않는다.
+
+    himalaya 1.2.0 Windows 는 config 를 **절대경로로** 받으면(-c 든 HIMALAYA_CONFIG 든)
+    auth.cmd 단계에서 멈춘다(실측). 기본 탐색(~/.config/himalaya/config.toml)은 정상이고,
+    셋업은 늘 그 위치에 쓰므로 그 경우엔 `-c` 를 빼서 어댑터의 다른 동사와 같은 경로를 탄다.
+    기본 위치가 아닌 config(저장소 폴백 등)만 예전처럼 `-c` 로 명시한다.
+    """
+    if not config_path or not Path(config_path).is_file():
+        return []
+    target = Path(config_path).resolve()
+    defaults = [Path.home() / ".config" / "himalaya" / "config.toml"]
+    if os.environ.get("HIMALAYA_CONFIG"):
+        defaults.append(Path(os.environ["HIMALAYA_CONFIG"]))  # himalaya 가 env 로 스스로 읽는다
+    for d in defaults:
+        try:
+            if d.is_file() and d.resolve() == target:
+                return []
+        except OSError:
+            pass
+    return ["-c", config_path]
+
+
 def parse_date(date_str):
     """다양한 형식의 날짜 문자열(ISO8601, RFC2822 등)을 timezone-aware datetime(UTC)으로 변환."""
     if not date_str:
@@ -98,10 +121,9 @@ def extract_addrs(to_field):
 def find_sent_folder(account, himalaya_bin, config_path=None):
     """himalaya folder list 로 보낸편지함 폴더명을 탐색."""
     cmd = [himalaya_bin, "folder", "list", "-a", account, "-o", "json"]
-    if config_path and Path(config_path).is_file():
-        cmd.extend(["-c", config_path])
+    cmd.extend(himalaya_config_args(config_path))
     try:
-        res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        res = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", check=False)
         if res.returncode == 0:
             folders = json.loads(res.stdout)
             # 1) desc 에 \Sent 가 있는 폴더 우선
@@ -125,10 +147,9 @@ def get_sent_envelopes(account, folder, himalaya_bin, window_sec, config_path=No
     envelopes = []
     for psize in [20, 100, 500]:
         cmd = [himalaya_bin, "envelope", "list", "-a", account, "-f", folder, "--page-size", str(psize), "-o", "json"]
-        if config_path and Path(config_path).is_file():
-            cmd.extend(["-c", config_path])
+        cmd.extend(himalaya_config_args(config_path))
         try:
-            res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            res = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", check=False)
             if res.returncode != 0:
                 break
             envelopes = json.loads(res.stdout)
@@ -228,4 +249,12 @@ def main():
 
 
 if __name__ == "__main__":
+    # 출력도 UTF-8 로 고정한다. 한글 Windows 에서 PYTHONUTF8/PYTHONIOENCODING 없이 실행되면
+    # stdout/stderr 가 cp949·cp1252 라 한글을 쓰다 UnicodeEncodeError 가 난다(어댑터 env 와 이중 안전장치).
+    for _s in (sys.stdout, sys.stderr):
+        if hasattr(_s, "reconfigure"):
+            try:
+                _s.reconfigure(encoding="utf-8", errors="backslashreplace")
+            except Exception:
+                pass
     main()

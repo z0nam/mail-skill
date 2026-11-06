@@ -73,7 +73,15 @@ function Invoke-Python {
     $exe = $cmd[0]
     $prefix = Tail $cmd 1
     $allArgs = @($prefix) + @($args)
-    & $exe @allArgs
+    # 한글 Windows 는 python 기본 인코딩이 cp949 라 himalaya 의 UTF-8 출력을 읽다 깨진다.
+    # 자식 python 의 입출력·subprocess 기본을 UTF-8 로 고정하고, 그 UTF-8 stdout 을
+    # PowerShell 이 cp949 로 잘못 읽지 않도록 호출 동안만 콘솔 출력 인코딩도 UTF-8 로 맞춘다.
+    $env:PYTHONUTF8 = '1'
+    $env:PYTHONIOENCODING = 'utf-8'
+    $prevOutEnc = $null
+    try { $prevOutEnc = [Console]::OutputEncoding; [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false } catch { $prevOutEnc = $null }
+    try { & $exe @allArgs }
+    finally { if ($null -ne $prevOutEnc) { try { [Console]::OutputEncoding = $prevOutEnc } catch {} } }
 }
 
 function Get-PythonExe {
