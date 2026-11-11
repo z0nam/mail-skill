@@ -20,8 +20,62 @@ import os
 import re
 import subprocess
 import sys
-from email.message import EmailMessage
+import unicodedata
+from email.encoders import encode_base64
+from email.header import Header
+from email.mime.base import MIMEBase
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 from pathlib import Path
+
+
+def rfc2047_param(name):
+    """첨부 파일명을 Content-Disposition/Content-Type 파라미터 값으로 만든다.
+
+    - NFC 정규화(macOS 파일명은 NFD 자모분리일 수 있음) 후,
+    - ASCII 이면 그대로(plain), 비ASCII 면 RFC 2047 인코디드워드(=?utf-8?b?...?=)로.
+
+    RFC 2231 `filename*` 분할형(퍼센트 인코딩)은 쓰지 않는다 — 행정망 등
+    RFC 2231 미해석 수신자에서 파일명이 깨지기 때문(#22). 네이버웍스 웹메일과 같은
+    방식이다. compat32(레거시 MIME*) 직렬화에서는 이미 ASCII 인 인코디드워드 문자열이
+    EmailPolicy 처럼 다시 RFC 2231 로 재인코딩되지 않아 이 형태가 보존된다.
+    """
+    nfc = unicodedata.normalize("NFC", name)
+    try:
+        nfc.encode("ascii")
+        return nfc
+    except UnicodeEncodeError:
+        # maxlinelen 을 크게 줘서 인코디드워드가 접히지(folding) 않고 한 덩어리로 남게 한다.
+        return str(Header(nfc, "utf-8").encode(maxlinelen=998))
+
+
+def _quote_param(value):
+    """헤더 파라미터 quoted-string 값용 이스케이프(헤더 인젝션/따옴표 깨짐 방지)."""
+    return value.replace("\\", "\\\\").replace('"', '\\"').replace("\r", "").replace("\n", "")
+
+
+def encode_address_header(value):
+    """From/To/Cc/Bcc 헤더 값. 표시이름(display name)에 비ASCII 가 있으면 그 부분만
+    RFC 2047 로 인코딩하고 주소(<a@b>)는 그대로 둔다(주소 파싱 가능하게 유지).
+    compat32 Generator 는 비ASCII str 를 자동 인코딩하지 않으므로 직접 처리한다."""
+    out = []
+    for disp, addr in email.utils.getaddresses([value]):
+        if disp:
+            try:
+                disp.encode("ascii")
+            except UnicodeEncodeError:
+                disp = str(Header(disp, "utf-8").encode(maxlinelen=998))
+        out.append(email.utils.formataddr((disp, addr)))
+    return ", ".join(out)
+
+
+def encode_text_header(value):
+    """Subject 등 자유 텍스트 헤더. ASCII 면 그대로, 비ASCII 면 RFC 2047 로."""
+    try:
+        value.encode("ascii")
+        return value
+    except UnicodeEncodeError:
+        return str(Header(value, "utf-8").encode())
 
 
 def himalaya_config_args(config_path):
@@ -272,15 +326,44 @@ def main():
             print(f"  {line}")
         return
 
-    # MIME 객체 생성
-    msg = EmailMessage()
-    msg["From"] = from_addr
-    msg["To"] = to_addr
+    # MIME 객체 생성.
+    #
+    # 레거시 compat32 API(MIMEMultipart/MIMEText/MIMEBase)로 조립한다. 모던
+    # EmailMessage(EmailPolicy)는 비ASCII 첨부 파일명을 최종 직렬화 단계에서 반드시
+    # RFC 2231 `filename*` 분할형으로 재인코딩하는데(set_param/replace_header/legacy
+    # part 혼입으로도 우회 불가, 실측), 행정망 등 RFC 2231 미해석 수신자에서 파일명이
+    # 깨진다(#22). compat32 는 이미 ASCII 인 인코디드워드 파라미터 문자열을 그대로 두므로
+    # 네이버웍스 웹메일과 같은 RFC 2047 형태(filename/name 둘 다)가 보존된다.
+    body_part = MIMEText(body, "plain", "utf-8")
+
+    if a.attach:
+        msg = MIMEMultipart()
+        msg.attach(body_part)
+        for item in a.attach:
+            path = Path(item)
+            ctype, encoding = mimetypes.guess_type(str(path))
+            if ctype is None or encoding is not None:
+                ctype = "application/octet-stream"
+            maintype, subtype = ctype.split("/", 1)
+            part = MIMEBase(maintype, subtype)
+            part.set_payload(path.read_bytes())
+            encode_base64(part)
+            fn = _quote_param(rfc2047_param(path.name))
+            part["Content-Disposition"] = 'attachment; filename="%s"' % fn
+            part.replace_header("Content-Type", '%s/%s; name="%s"' % (maintype, subtype, fn))
+            msg.attach(part)
+    else:
+        msg = body_part
+
+    # 헤더 설정. 비ASCII(한글 표시이름·제목)는 compat32 에서 자동 인코딩되지 않으므로
+    # RFC 2047 로 직접 인코딩해 넣는다(안 그러면 Generator 가 깨뜨리거나 예외).
+    msg["From"] = encode_address_header(from_addr)
+    msg["To"] = encode_address_header(to_addr)
     if a.cc:
-        msg["Cc"] = a.cc
+        msg["Cc"] = encode_address_header(a.cc)
     if a.bcc:
-        msg["Bcc"] = a.bcc
-    msg["Subject"] = subj
+        msg["Bcc"] = encode_address_header(a.bcc)
+    msg["Subject"] = encode_text_header(subj)
 
     # 표준 날짜 및 메시지 ID 보장 (1970년 날짜 및 스레딩 누락 방지)
     msg["Date"] = email.utils.formatdate(localtime=True)
@@ -291,19 +374,7 @@ def main():
     if references:
         msg["References"] = references
 
-    msg.set_content(body)
-
-    for item in a.attach:
-        path = Path(item)
-        ctype, encoding = mimetypes.guess_type(str(path))
-        if ctype is None or encoding is not None:
-            ctype = "application/octet-stream"
-        maintype, subtype = ctype.split("/", 1)
-        msg.add_attachment(
-            path.read_bytes(), maintype=maintype, subtype=subtype, filename=path.name
-        )
-
-    raw_bytes = bytes(msg)
+    raw_bytes = msg.as_bytes()
     if a.output:
         Path(a.output).write_bytes(raw_bytes)
     else:
