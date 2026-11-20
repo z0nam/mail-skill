@@ -20,13 +20,13 @@ mailskill accounts                  # 계정 목록(JSON)
 mailskill list   <acct> [n]         # 최근 n통
 mailskill search <acct> <query...>  # IMAP 쿼리 검색
 mailskill read   <acct> <id>        # 메시지 읽기
-mailskill reply  <acct> <id>        # 회신 초안 (발송은 사용자 승인 후)
+mailskill reply  <acct> <id>        # = send --reply-to <id> (기본 미리보기, 발송은 사용자 승인 후)
 ```
 또는 그냥 자연어로 "X 계정에서 … 메일 찾아줘" — `mail` 스킬이 알아서 라우팅.
 
 ## 시크릿 모델
 앱비번은 `~/.config/mail-skill/secrets.age`(age 암호화) + 기계별 키 `~/.config/mail-skill/age-key.txt`. 평문 없음, macOS/Linux 공통.
-- 등록: `scripts/secret-set himalaya-<name>` (config의 `auth.cmd = "mail-secret himalaya-<name>"` 와 일치)
+- 등록: `scripts/secret-set himalaya-<name>` (config의 `password.command = "mail-secret himalaya-<name>"` 와 일치, himalaya 2.x 형식)
 - 여러 기계 git-동기화를 원하면 시크릿을 별도 private 레포의 `secrets/secrets.age` 에 두고 `MAIL_SKILL_SECRETS` 로 지정(고급).
 
 ## 구글 계정

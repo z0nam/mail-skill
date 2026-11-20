@@ -21,7 +21,7 @@ mailskill list   <acct> [-f <폴더>] [n]  # 최근 n통 (폴더 미지정 시 I
 mailskill search <acct> [-f <폴더>] <query...>   # 쿼리 검색 (문법은 아래)
 mailskill read   <acct> <id> [folder]   # 메시지 읽기
 mailskill folders <acct>                # 폴더 목록
-mailskill reply  <acct> <id>            # 회신 초안 (대화형 $EDITOR)
+mailskill reply  <acct> <id> [send 옵션] # = send --reply-to <id> (기본 미리보기, --send 로 발송)
 mailskill send   <acct> [옵션...]       # 메일 발송/비대화형 답장 (미리보기 기본, --send 로 실전송)
 mailskill attachment <acct> <id> [dir]  # 첨부파일 다운로드 (비표준 헤더 복원 및 무결성 검증)
 mailskill watch  <acct> [옵션...]       # 새 메일/회신 폴링 대기 (별칭: mail-watch)
@@ -47,14 +47,14 @@ mailskill search ji -f "Sent Messages" after 2026-07-01   # 보낸편지함
 > 잘못된 쿼리는 exit 1 + stderr 에러로 떨어진다(빈 결과와 구분됨).
 > `after`/`before` 경계는 **배타적**이다 — 7/1 을 포함하려면 `after 2026-06-30`.
 
-날짜 검색은 서버가 0건을 답하면 **어댑터가 클라이언트측으로 자동 재확인**한다.
-일부 IMAP 서버(네이버웍스 등)가 himalaya 의 `SENTSINCE`/`SENTBEFORE` 에 에러 없이
-늘 0건을 답하기 때문이다. 사용자는 신경 쓸 필요 없다 — 결과만 맞으면 된다.
-(자세한 배경: `scripts/date-search.py` 머리말)
+날짜 조건(`date`/`after`/`before`)은 **서버에 보내지 않고 클라이언트에서 거른다**(`scripts/search.py`).
+일부 IMAP 서버(네이버웍스 등)가 날짜 검색(`SENTSINCE`/`SENTON`)에 에러 없이 늘 0건을 답하고,
+himalaya 2.x 는 `before` 를 없앴기 때문이다. 날짜+`from`/`subject` 복합 질의도 그대로 맞게 나온다.
 
-> 자동 재확인은 **날짜 조건만으로 이루어진 질의**(`and` 결합, `order by` 꼬리 허용)에만
-> 적용된다. 날짜+`from`/`subject` 복합 질의가 네이버웍스류 계정에서 0건이면 오탐일 수
-> 있다 — 그 땐 **날짜만으로 검색한 뒤 나머지 조건은 결과 JSON 에서 직접 필터링**할 것.
+> 날짜 조건은 **최상위 `and` 로만** 묶을 수 있다. `or`/`not`/괄호 안에 날짜를 넣으면
+> exit 2 로 거절된다(조용한 오답 방지) — 날짜는 바깥 `and` 로 빼서 다시 질의할 것.
+> **날짜만으로 검색한 결과의 `has_attachment` 는 `null` 일 수 있다**(폴더 전체를 훑느라 첨부 조회를 생략).
+> 첨부 여부가 필요하면 `list` 나 `read` 로 확인할 것.
 
 ### 출력 계약
 JSON 동사(`accounts`/`folders`/`list`/`search`/`read`)는 **stdout 에 JSON 만** 낸다.
@@ -117,6 +117,13 @@ mailskill send ji --to user@example.com --subject "자료 송부" --body-file ./
 2. **중복 발송 가드**: `--send` 실행 직전 보낸편지함에서 최근 10분(기본) 내 **동일 수신자 + 동일 제목** 메일이 감지되면 발송을 차단(exit 3)하고 경고를 출력한다. 의도적인 재발송은 `--force` 플래그를 추가한다.
 3. **APPEND-UID 오류 안전 처리**: 네이버웍스(`ji`) 등 일부 IMAP/SMTP 서버에서 SMTP 전송 성공 후 보낸편지함 저장 단계에서 `cannot find UID of appended IMAP message` 오류로 비정상 종료되는 현상이 있다. 메일은 이미 수신자에게 전송되었으므로, `mailskill send`는 이를 **발송 성공(보낸함 저장 확인 실패)으로 자동 분류하여 exit 0**으로 종료하고 "재시도 금지" 경고를 출력한다 (에이전트가 실패로 오인해 재전송하는 버그 원천 방지).
 4. **한글 제목 RFC 2047 인코딩 보호**: `compose-mime.py`(파이썬 표준 라이브러리)를 통해 MIME을 조립하므로, 3바이트 UTF-8 한글 글자가 인코딩 단어 경계에서 쪼개지는 깨짐 현상이 발생하지 않는다.
+5. **첨부 용량 가드 (#24)**: 미리보기에 `첨부 합계 : <합계> / 한도 <MB>` 를 보여 주고, 합계가 한도(기본 20MB)를 넘으면 경고한다. 그 상태의 `--send` 는 **exit 4** 로 막힌다(`--force` 로도 못 넘는다). SMTP 로 큰 파일을 직접 붙이면 수 분 뒤 타임아웃으로 실패하기 때문이다. exit 4 면 재시도하지 말고 사용자에게 대안을 안내한다: 웍스 웹메일의 대용량 첨부, 또는 드라이브에 올려 공유 링크를 본문에 넣기.
+   - 한도 조정(우선순위 순): 환경변수 `MAILSKILL_ATTACH_LIMIT_MB=<MB>`(0 이하면 가드 끔) → `~/.config/mail-skill/settings.toml`(경로는 `MAIL_SKILL_SETTINGS` 로 변경 가능)의 표
+     ```toml
+     [attach-limit-mb]
+     default = 20
+     ji = 25
+     ```
 
 ## 첨부파일 다운로드 (`mailskill attachment`)
 메일의 첨부파일을 내려받을 때는 **himalaya attachment download 를 쓰지 말고 반드시 `mailskill attachment`**를 사용한다.

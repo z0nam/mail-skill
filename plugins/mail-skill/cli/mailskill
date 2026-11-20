@@ -5,9 +5,12 @@
 #   mail accounts                     계정 목록 (JSON)
 #   mail folders <acct>               폴더 목록 (JSON)
 #   mail list    <acct> [n]           최근 n통 (JSON, 기본 20)
-#   mail search  <acct> <query...>    IMAP 쿼리 검색 (JSON)
+#   mail search  <acct> [-f <folder>] <query...>  검색 (JSON). himalaya 쿼리 DSL 또는 맨 키워드
+#   mail search  gmail from koreanair.com and after 2026-11-01   예: DSL(첫 낱말이 not/date/before/after/from/to/subject/body/flag/order/괄호)은 그대로
+#   mail search  gmail 대한항공 항공권   예: 맨 키워드 → (subject 대한항공 or body 대한항공) and (subject 항공권 or body 항공권)
+#   mail search  gmail "hello world"     예: 따옴표로 묶은 한 인자는 구(phrase) 하나로 → subject hello\ world or body hello\ world
 #   mail read    <acct> <id> [folder] 메시지 읽기 (JSON)
-#   mail reply   <acct> <id>          회신(초안) — 발송 전 사용자 승인 필수
+#   mail reply   <acct> <id> [옵션]   회신 = send --reply-to <id> 와 같음 — 기본 미리보기, 발송 전 사용자 승인 필수
 #   mail send    <acct> [옵션]        메일 발송/답장(첨부 가능) — 기본 미리보기, --send 로 실전송
 #   mail attachment <acct> <id> [dir] 첨부파일 다운로드 (무결성 검증)
 #   mail watch   <acct> [옵션]        새 메일 폴링 대기 (도착 exit 0, 시간초과 exit 2)
@@ -18,12 +21,21 @@
 # 내보낸다. 진단·경고·에러는 전부 stderr. 호출측이 두 스트림을 합쳐 받아도(에이전트의
 # Bash 도구가 그렇다) 파싱이 깨지지 않아야 하므로, 백엔드 로그는 애초에 끈다.
 #   디버깅: MAILSKILL_LOG=debug mailskill list <acct>   (stderr 로만 나감)
+#
+# 백엔드: himalaya **2.x 전용**(#30). 2.x 는 에러를 stdout 으로 내고(--json 이면 {"error":..}),
+# 출력 모양도 1.x 와 다르다. 그래서 himalaya 는 직접 부르지 않고 scripts/hjson.py(실행 모드)를
+# 거친다 — hjson 이 --json/--raw 를 붙여 실행하고, 성공이면 1.x 계약 모양 JSON 을 stdout 에,
+# 실패면 정리한 에러를 stderr 에 내고 stdout 을 비운 채 같은 rc 로 끝낸다.
+# 버전 가드·보낸함 저장 실패·account check 판정 문구도 hjson.py 한 곳에 있다(mailskill.ps1 과 공유).
 set -euo pipefail
 H="${HIMALAYA_BIN:-himalaya}"
+export HIMALAYA_BIN="$H"                  # hjson.py·search.py 등 python 헬퍼가 같은 실행 파일을 쓰게.
 export RUST_LOG="${MAILSKILL_LOG:-off}"   # himalaya(tracing) 로그 억제. 에러/exit code 는 유지됨.
 # python 헬퍼의 open/stdin/stdout/subprocess 기본 인코딩을 UTF-8 로 고정한다.
 # 한글 Windows(Git Bash 포함)에선 기본이 cp949 라 himalaya 의 UTF-8 출력을 읽다 깨진다.
 export PYTHONUTF8=1 PYTHONIOENCODING=utf-8
+# 색 끄기 요청. 에러 원문의 ANSI 색·"Suggestions:" 꼬리는 hjson.py 가 한 번 더 걷어낸다.
+export NO_COLOR=1
 
 # 이 스크립트는 보통 PATH 심링크(/opt/homebrew/bin/mailskill)로 불린다.
 # 저장소의 scripts/ 를 찾으려면 심링크를 끝까지 따라가 실제 위치를 알아내야 한다.
@@ -76,40 +88,77 @@ exec_python() {
   fi
 }
 
-# json_verb <backend cmd...> — JSON 동사 공통 래퍼.
-# stdout 은 JSON 으로 확인된 경우에만 통과시킨다. 백엔드가 실패를 stderr 로만 알리고
-# exit 0 을 내는 경우(himalaya v1.2.0 의 쿼리 파스 에러가 그렇다)를 여기서 잡아
-# 비정상 종료로 승격한다. 그러지 않으면 호출측은 "빈 결과"와 "깨진 호출"을 구분 못한다.
-json_verb() {
-  local out rc=0 err
-  err="$(mktemp)"
-  out="$("$@" 2>"$err")" || rc=$?
-  if [[ $rc -ne 0 ]]; then
-    # himalaya 는 결과가 0건일 때 "page N out of bounds" 로 죽는다. 이건 실패가 아니라
-    # 빈 결과다 — 그대로 두면 호출측이 멀쩡한 계정을 "조회 실패"로 표시한다.
-    if grep -q "out of bounds" "$err"; then
-      rm -f "$err"; printf '[]\n'; return 0
-    fi
-    cat "$err" >&2; rm -f "$err"
-    echo "mailskill: backend failed (exit $rc): $*" >&2
-    return "$rc"
+# hj <kind> -- <himalaya 하위명령...> — hjson.py 실행 모드(#30). 계약은 위 머리 주석 참조.
+# 실패하면(실행 파일 없음 127 제외) 버전 가드를 한 번 돌린다: 1.x 가 깔려 있으면 2.x 전용 플래그
+# (--json 등)에서 clap 사용법 에러로 깨지는데, 그 원문만으로는 원인을 알기 어렵다. 성공 경로에는
+# 비용이 없게 실패했을 때만 확인한다. 안내 문구는 hjson.py version 이 stderr 로 낸다.
+hj() {
+  local rc=0
+  run_python "$REPO/scripts/hjson.py" "$@" || rc=$?
+  [[ $rc -ne 0 && $rc -ne 127 ]] && version_hint
+  return "$rc"
+}
+version_hint() { run_python "$REPO/scripts/hjson.py" version >/dev/null || true; }
+
+# himalaya 2.x 가 -c 없이 읽는 config 후보(순서대로). hjson.py config_candidates·mailskill.ps1
+# Get-HimalayaConfigCandidates 와 같은 목록 — 한쪽만 고치지 말 것.
+config_candidates() {
+  if [[ -n "${HIMALAYA_CONFIG:-}" ]]; then printf '%s\n' "$HIMALAYA_CONFIG"; return; fi
+  if [[ -n "${APPDATA:-}" ]]; then printf '%s\n' "$APPDATA/himalaya/config.toml"
+  elif [[ "$(uname -s)" == Darwin ]]; then printf '%s\n' "$HOME/Library/Application Support/himalaya/config.toml"
+  elif [[ -n "${XDG_CONFIG_HOME:-}" && "$XDG_CONFIG_HOME" != "$HOME/.config" ]]; then printf '%s\n' "$XDG_CONFIG_HOME/himalaya/config.toml"; fi
+  printf '%s\n' "$HOME/.config/himalaya/config.toml" "$HOME/.himalayarc"
+}
+# resolve_config — himalaya 가 실제로 읽을 파일(헬퍼가 From·보낸함을 같은 파일에서 읽게). 없으면 저장소 폴백.
+resolve_config() {
+  local f
+  while IFS= read -r f; do [[ -f "$f" ]] && { printf '%s' "$f"; return; }; done < <(config_candidates)
+  printf '%s' "$REPO/config/config.toml"
+}
+# config_shadow_warning — 앞 순위 파일 때문에 ~/.config 쪽(setup 이 만드는 곳)이 읽히지 않으면 stderr 로 알린다.
+config_shadow_warning() {
+  local used dot="$HOME/.config/himalaya/config.toml"
+  [[ -n "${HIMALAYA_CONFIG:-}" ]] && return 0
+  used="$(resolve_config)"
+  if [[ -f "$dot" && "$used" != "$dot" ]]; then
+    echo "mailskill: [주의] $used 가 있어서 $dot 는 읽히지 않습니다(himalaya 2.x 는 OS 설정 폴더를 먼저 씁니다). 하나만 남기세요." >&2
   fi
-  # 성공 경로에서는 백엔드 stderr 를 삼킨다. 합쳐진 스트림으로 받는 호출측의
-  # 파싱을 깨지 않기 위함 — 진단이 필요하면 MAILSKILL_LOG 로 켠다.
-  [[ -n "${MAILSKILL_LOG:-}" ]] && cat "$err" >&2
-  rm -f "$err"
-  # 앞쪽 공백을 걷어낸 첫 글자가 '[' '{' '"' 중 하나여야 JSON.
-  # '"' 를 받는 이유: himalaya v1.2.0 의 `message read -o json` 은 메시지 전체를
-  # **JSON 문자열 스칼라** 하나로 낸다("From: ...\n\n본문..."). 배열·객체만 허용하면
-  # 이 멀쩡한 출력이 반려돼 read 동사가 구조적으로 늘 실패한다(list/search 는 배열이라
-  # 통과하므로 증상이 read 에만 나타나 원인을 찾기 어렵다).
-  local trimmed="${out#"${out%%[![:space:]]*}"}"
-  case "${trimmed:0:1}" in
-    "[" | "{" | '"') ;;
-    *) echo "mailskill: backend produced non-JSON stdout (see stderr above): $*" >&2
-       return 1 ;;
+}
+
+# search_query <args...> — search 인자를 himalaya 쿼리로 바꿔 전역 배열 SQ 에 담는다.
+# 첫 낱말(앞쪽 '(' 제외)이 mailskill 검색 DSL 키워드(himalaya 2.x DSL + before — before 는 search.py 가 클라이언트에서 처리)면 그대로 넘긴다(대소문자 무시 — 대문자
+# 오타는 himalaya 의 파스 에러가 그대로 보이게). 아니면 맨 키워드로 보고 인자 하나하나를
+# "subject <kw> or body <kw>" 로 감싸 and 로 잇는다(#25). 인자 안의 공백·괄호·역슬래시는
+# 역슬래시로 이스케이프한다 — himalaya 패턴에서 따옴표는 글자 그대로라 구를 못 묶고,
+# '\ ' 이스케이프는 받는다(실측). 인자를 감싼 바깥 큰따옴표 한 쌍은 벗긴다.
+# body 가 든 OR 묶음을 disjunct 마다 따로 서버에 묻고 합치는 일은 search.py 가 한다(웍스는 BODY 가
+# 든 검색에 OR 로 묶어도 늘 0건, #30 실기). 여기서는 감싸기만 한다.
+# mailskill.ps1 의 ConvertTo-SearchQuery 와 같은 규칙이다 — 한쪽만 고치지 말 것.
+search_query() {
+  SQ=()
+  [[ $# -eq 0 ]] && return 0
+  # 첫 인자의 첫 낱말로 판정한다 — "subject hello" 처럼 DSL 전체를 한 인자로 넘기는 호출도 있다.
+  local first="${1#"${1%%[![:space:]]*}"}"
+  first="${first#"${first%%[!(]*}"}"
+  first="${first%%[[:space:]]*}"
+  case "$(printf '%s' "$first" | tr '[:upper:]' '[:lower:]')" in
+    ''|not|date|before|after|from|to|subject|body|flag|order) SQ=("$@"); return 0 ;;
   esac
-  printf '%s\n' "$out"
+  local kw esc terms=()
+  for kw in "$@"; do
+    [[ "$kw" == \"*\" && ${#kw} -ge 2 ]] && kw="${kw:1:${#kw}-2}"
+    [[ -z "${kw//[[:space:]]/}" ]] && continue
+    esc="$(printf '%s' "$kw" | sed -e 's/[\\ ()]/\\&/g')"
+    terms+=("$esc")
+  done
+  if [[ ${#terms[@]} -eq 1 ]]; then
+    SQ=(subject "${terms[0]}" or body "${terms[0]}")
+    return 0
+  fi
+  for esc in ${terms[@]+"${terms[@]}"}; do
+    [[ ${#SQ[@]} -gt 0 ]] && SQ+=(and)
+    SQ+=("(subject" "$esc" or body "$esc)")
+  done
 }
 
 # 사용법은 이 파일 맨 위 계약 주석에서 뽑는다 — 두 군데에 적어두면 갈라진다.
@@ -129,6 +178,15 @@ fi
 # 동사 바로 뒤의 -h/--help 는 인자 검사보다 먼저 받는다. 그러지 않으면
 # `mailskill read --help` 가 필수 인자 검사(${2:?id})에 먼저 걸려 bash 내부 에러만 낸다.
 case "${1:-}" in -h|--help) usage; exit 0 ;; esac
+# reply <acct> <id> [send 옵션...] = send <acct> --reply-to <id> [send 옵션...]
+# 1.x 의 대화형 `message reply` 는 2.x 에서 비대화형 플래그 방식으로 바뀌었다(#30). 에이전트용
+# 회신은 이미 send --reply-to(미리보기 게이트·dup-guard·첨부 가드 포함)가 하므로 그리로 넘긴다.
+if [[ "$cmd" == "reply" ]]; then
+  [[ $# -ge 2 ]] || { echo "mailskill reply: <account> 및 <id> 필요 (예: mailskill reply ji 123 --body '...')" >&2; exit 2; }
+  r_acct="$1"; r_id="$2"; shift 2
+  set -- "$r_acct" --reply-to "$r_id" "$@"
+  cmd=send
+fi
 case "$cmd" in
   -h|--help|help) usage; exit 0 ;;
   '') usage >&2; exit 2 ;;   # 무동사 = 사용법 에러(계약: exit 2). 명시적 help 만 0.
@@ -138,7 +196,8 @@ case "$cmd" in
       echo "[]"
       exit 0
     fi
-    out="$("$H" account list -o json 2>/dev/null)" || {
+    # 계약: accounts 는 실패해도 [] + exit 0(호출측이 "계정 없음"으로 다룬다). 이유는 stderr 로.
+    out="$(hj accounts -- account list 2>/dev/null)" || {
       echo "mailskill: '$H account list' failed — returning []" >&2
       echo "[]"
       exit 0
@@ -146,66 +205,40 @@ case "$cmd" in
     if [[ -z "$out" || "$out" == "null" ]]; then
       echo "[]"
     else
-      echo "$out"
+      printf '%s\n' "$out"
     fi
     ;;
-  folders)  json_verb "$H" folder list -a "${1:?account}" -o json ;;
+  folders)  hj folders -- mailbox list -a "${1:?account}" ;;
   list)
     acct="${1:?account}"; shift
-    # list <acct> [-f <folder>] [n]
-    fold=(); [[ "${1:-}" == "-f" ]] && { fold=(-f "${2:?folder}"); shift 2; }
-    json_verb "$H" envelope list -a "$acct" ${fold[@]+"${fold[@]}"} --page-size "${1:-20}" -o json ;;
+    # list <acct> [-f <folder>] [n]   — 어댑터의 -f 는 2.x 의 -m(--mailbox)
+    fold=(); [[ "${1:-}" == "-f" ]] && { fold=(-m "${2:?folder}"); shift 2; }
+    # --has-attachment: 웍스 IMAP 은 이 플래그 없이는 has-attachment 가 null 이다(#30 실기). 1.x 계약의
+    # has_attachment(참/거짓)를 지키려고 붙인다. 봉투마다 조회가 하나씩 늘지만 list 는 n 통(기본 20)뿐이다.
+    hj envelopes -- envelope list -a "$acct" ${fold[@]+"${fold[@]}"} -s "${1:-20}" --has-attachment ;;
   search)
     acct="${1:?account}"; shift
     # search <acct> [-f <folder>] <query...>   — 폴더 미지정 시 INBOX
-    fold=(); foldname="-"
-    [[ "${1:-}" == "-f" ]] && { fold=(-f "${2:?folder}"); foldname="$2"; shift 2; }
-    # himalaya 의 기본 페이지 크기는 10 이라, 그대로 두면 검색 결과가 조용히 10건에서
-    # 잘린다(실측: 24건짜리 질의가 10건으로 나옴). 잘렸는지 알 방법이 없으므로
-    # 포화되지 않을 때까지 페이지를 키운다. 끝까지 포화면 자르지 말고 실패시킨다.
-    out=""
-    for psize in 200 1000 5000; do
-      out="$(json_verb "$H" envelope list -a "$acct" ${fold[@]+"${fold[@]}"} \
-             --page-size "$psize" -o json -- "$@")" || exit $?
-      [[ "$(printf '%s' "$out" | grep -o '"id"' | wc -l | tr -d ' ')" -lt "$psize" ]] && break
-      if [[ "$psize" == 5000 ]]; then
-        echo "mailskill: 검색 결과가 5000건을 넘습니다 — 잘린 결과를 내보내지 않고 실패로 처리합니다. 기간·조건을 좁히십시오." >&2
-        exit 1
-      fi
-    done
-    # 서버측 날짜 검색이 0건이면 클라이언트측으로 재확인한다.
-    # 일부 IMAP 서버(네이버웍스 등)는 himalaya 가 쓰는 SENTSINCE/SENTBEFORE 에
-    # 에러 없이 늘 0건을 답한다 → 조용한 오탐. 자세한 내용은 scripts/date-search.py.
-    # 단, 재확인은 질의가 **날짜 조건만**으로 구성됐을 때만 한다 — from/subject 등이
-    # 섞인 질의를 날짜만으로 재조회하면 나머지 조건이 무시된 초과집합이 나가고,
-    # or/not 은 and 전제인 재확인과 의미가 다르다. 둘 다 "조용히 틀린 답"이므로 안 한다.
-    if [[ "$out" == "[]" ]]; then
-      toks=("$@")
-      # 정렬 꼬리(order by ...)는 결과 집합과 무관 — 떼고 판정한다.
-      for ((i = 0; i < ${#toks[@]}; i++)); do
-        [[ "${toks[i]}" == "order" && "${toks[i+1]:-}" == "by" ]] && { toks=(${toks[@]+"${toks[@]:0:i}"}); break; }
-      done
-      pure=1; dargs=(); prev=""
-      for tok in ${toks[@]+"${toks[@]}"}; do
-        case "$tok" in
-          after|before|date|and) ;;
-          *) [[ "$tok" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || pure=0 ;;
-        esac
-        case "$prev" in after|before|date) dargs+=("$prev=$tok") ;; esac
-        prev="$tok"
-      done
-      if [[ $pure -eq 1 && ${#dargs[@]} -gt 0 ]]; then
-        # 안내는 stderr 로도 내지 않는다 — 호출측이 두 스트림을 합쳐 받기 때문에
-        # 여기서 한 줄이라도 흘리면 이 어댑터가 지키려는 JSON 계약이 깨진다.
-        [[ -n "${MAILSKILL_LOG:-}" ]] && echo "mailskill: 서버측 날짜 검색 0건 → 클라이언트측 재확인" >&2
-        fb="$(run_python "$REPO/scripts/date-search.py" "$acct" "$foldname" "${dargs[@]}")" || exit $?
-        printf '%s\n' "$fb"
-        exit 0
-      fi
+    foldname="-"
+    [[ "${1:-}" == "-f" ]] && { foldname="${2:?folder}"; shift 2; }
+    search_query "$@"   # 맨 키워드면 subject/body DSL 로 감싼다(#25) → SQ
+    # 나머지는 search.py 가 한다(#30): 날짜 절(after/before/date)은 서버에 보내지 않고 클라이언트에서
+    # 거른다(웍스는 SENTSINCE/SENTON 에 늘 0건 · 2.x 는 before 를 없앰). 날짜 절이 or/not/괄호 안에
+    # 있으면 exit 2. 결과가 잘리지 않게 페이지를 200→1000→5000 으로 키우고, 끝까지 포화면 실패.
+    rc=0
+    run_python "$REPO/scripts/search.py" "$acct" "$foldname" -- ${SQ[@]+"${SQ[@]}"} || rc=$?
+    [[ $rc -ne 0 && $rc -ne 2 && $rc -ne 127 ]] && version_hint
+    exit "$rc" ;;
+  read)
+    out="$(hj read -- message read "${2:?id}" -a "${1:?account}" ${3:+-m "$3"})" || exit $?
+    # 빈 JSON 문자열("")은 "메시지 없음"이다(#29, 1.x IMAP 의 동작). 2.x 는 없는 id 에 exit 1 을
+    # 내지만 서버별 차이를 실기로 다 보지 못해 가드는 남긴다. 헤더만 있는 빈 본문 메일은 정상.
+    # 참고: 2.x 의 read 는 \Seen 을 찍지 않는다(1.x 는 찍었다) — 에이전트가 읽어도 안읽음이 유지된다.
+    if [[ "$(printf '%s' "$out" | tr -d '[:space:]')" == '""' ]]; then
+      echo "mailskill read: 메시지를 찾을 수 없습니다 — 계정 '$1', id '$2'${3:+, 폴더 '$3'}. id 와 폴더(-f 기본 INBOX)를 확인하십시오." >&2
+      exit 1
     fi
     printf '%s\n' "$out" ;;
-  read)     json_verb "$H" message read "${2:?id}" -a "${1:?account}" ${3:+-f "$3"} -o json ;;
-  reply)    "$H" message reply "${2:?id}" -a "${1:?account}" ;;
   send)
     # send <acct> (--to <a>|--reply-to <id>) [--cc <a>] [--bcc <a>] [--subject <s>]
     #             (--body <t>|--body-file <f|->) [--attach <f>]... [--reply-folder <f>]
@@ -246,7 +279,9 @@ case "$cmd" in
       bodyfile="$stdin_tmp"
     fi
     trap 'rm -f "${stdin_tmp:-}"' EXIT
-    CONFIG="${HIMALAYA_CONFIG:-$HOME/.config/himalaya/config.toml}"; [[ -f "$CONFIG" ]] || CONFIG="$REPO/config/config.toml"
+    # dup-guard·compose-mime 에 넘길 설정 경로 = himalaya 가 실제로 읽는 파일(resolve_config).
+    # 헬퍼는 이 파일에서 From 을 읽고, himalaya 에는 기본 탐색과 같으면 -c 를 주지 않는다(hjson.config_args).
+    CONFIG="$(resolve_config)"
     cargs=(--from-account "$acct" --config "$CONFIG" --himalaya-bin "$H")
     [[ -n "$to"        ]] && cargs+=(--to "$to")
     [[ -n "$cc"        ]] && cargs+=(--cc "$cc")
@@ -260,16 +295,20 @@ case "$cmd" in
 
     # 1. 메타데이터 추출 (계산된 To, Subject, In-Reply-To 등 확인, stdin 파이프로 대용량 인자 한도 회피)
     meta="$(run_python "$REPO/scripts/compose-mime.py" "${cargs[@]}" --dump-meta)" || exit $?
-    IFS=$'\t' read -r meta_to meta_subj in_reply_to references < <(printf '%s' "$meta" | run_python -c '
+    # 구분자는 \x1f(단위 구분자). 탭은 IFS 공백류라 빈 칸(In-Reply-To 없음 등)이 접혀 뒤 필드가 밀린다.
+    IFS=$'\x1f' read -r meta_to meta_subj in_reply_to references attach_over attach_summary < <(printf '%s' "$meta" | run_python -c '
 import json, sys
 m = json.load(sys.stdin)
-print("\t".join([m.get("to", ""), m.get("subject", ""), m.get("in_reply_to", ""), m.get("references", "")]))
+print("\x1f".join([m.get("to", ""), m.get("subject", ""), m.get("in_reply_to", ""), m.get("references", ""),
+                 "1" if m.get("attach_over_limit") else "0", m.get("attach_summary", "")]))
 ')
+    # 첨부 한도 초과 안내문(#24). 문구는 compose-mime.py 한 곳에서 만든다(ps1 과 공유).
+    attach_guard_msg=""
+    if [[ "$attach_over" == "1" ]]; then
+      attach_guard_msg="$(printf '%s' "$meta" | run_python -c 'import json,sys; print(json.load(sys.stdin).get("attach_guard_message",""))')"
+    fi
 
-    # 2. MIME 조립
-    raw="$(run_python "$REPO/scripts/compose-mime.py" "${cargs[@]}")" || exit $?
-
-    # 3. 미리보기 (dosend == 0)
+    # 2. 미리보기 (dosend == 0) — MIME 은 실전송 때만 조립한다(큰 첨부를 미리보기마다 메모리에 올리지 않음).
     if [[ "$dosend" -eq 0 ]]; then
       dup_warn=0
       if [[ "$force" -eq 0 ]]; then
@@ -284,7 +323,10 @@ print("\t".join([m.get("to", ""), m.get("subject", ""), m.get("in_reply_to", "")
       echo "제목      : $meta_subj"
       [[ -n "$in_reply_to" ]] && echo "In-Reply-To: $in_reply_to"
       [[ -n "$references"  ]] && echo "References : $references"
-      [[ "${#attach[@]}" -gt 0 ]] && echo "첨부      : ${attach[*]}"
+      if [[ "${#attach[@]}" -gt 0 ]]; then
+        echo "첨부      : ${attach[*]}"
+        echo "첨부 합계 : $attach_summary"
+      fi
       echo "본문:"
       if [[ -n "$body" ]]; then printf '%s\n' "$body" | sed 's/^/  /'
       elif [[ "$bodyfile" == "-" ]]; then echo "  (stdin)"
@@ -293,45 +335,61 @@ print("\t".join([m.get("to", ""), m.get("subject", ""), m.get("in_reply_to", "")
         echo
         echo "⚠️  주의: 최근 ${dupwindow}분 내 동일 수신자+제목 발송 이력이 있습니다. 실전송 시 --force 옵션이 필요합니다."
       fi
+      if [[ "$attach_over" == "1" ]]; then
+        echo
+        printf '⛔ %s\n' "$attach_guard_msg"
+        echo "   (이 상태로는 --send 해도 발송되지 않습니다.)"
+      fi
       exit 0
     fi
 
-    # 4. 실전송 (dosend == 1)
+    # 3. 실전송 (dosend == 1)
+    # 첨부 한도 가드(#24): 중복 가드·MIME 조립보다 먼저 막는다. --force 로도 넘을 수 없다.
+    if [[ "$attach_over" == "1" ]]; then
+      printf 'mailskill send: %s\n' "$attach_guard_msg" >&2
+      exit 4
+    fi
     # 중복 발송 가드: --force 가 아닐 때 보낸편지함 검사
     if [[ "$force" -eq 0 ]]; then
       run_python "$REPO/scripts/dup-guard.py" --account "$acct" --to "$meta_to" --subject "$meta_subj" \
         --window "$dupwindow" --config "$CONFIG" --himalaya-bin "$H" || exit $?
     fi
 
-    # himalaya message send 실행 및 APPEND-UID 오류('발송 성공'으로 분류) 처리
-    errFile="$(mktemp)"
+    # MIME 조립 — 임시 파일로 바로 쓴다(셸 변수를 거치면 끝 개행이 잘리고 큰 첨부가 메모리에 오른다).
+    # trap 은 하나만 걸린다 — stdin 임시본과 함께 지운다.
+    raw_file="$(mktemp)"
+    trap 'rm -f "${stdin_tmp:-}" "${raw_file:-}"' EXIT
+    run_python "$REPO/scripts/compose-mime.py" "${cargs[@]}" > "$raw_file" || exit $?
+
+    # 발송은 hjson.py send 가 한다(#30): `message send -a A -- <파일>`. 판정 한 단어(sent|sent-save-failed|failed)가
+    # stdout 으로 나오므로 삼키고, 사람용 안내는 hjson 이 stderr 로 낸다(문구는 PS 판과 공유).
+    # 2.x 는 SMTP 발송 → 보낸함 APPEND 순서라 "Message sent, but saving a copy ... failed" 는 **발송 성공**이다.
+    # hjson 이 이 경우 exit 0 + 재시도 금지 안내를 낸다 — 여기서 재시도하면 중복 발송이다.
     rc=0
-    printf '%s' "$raw" | "$H" message send -a "$acct" 2>"$errFile" || rc=$?
+    verdict="$(run_python "$REPO/scripts/hjson.py" send --account "$acct" --file "$raw_file")" || rc=$?
+    verdict="$(printf '%s' "$verdict" | head -1 | tr -d '[:space:]')"
     if [[ $rc -ne 0 ]]; then
-      if grep -q "cannot find UID of appended IMAP message" "$errFile"; then
-        echo "mailskill send: 발송 완료, 보낸함 저장 확인 실패 — 재시도 금지 (cannot find UID of appended IMAP message)" >&2
-        echo "메일은 SMTP로 정상 발송되었습니다. 수신자에게 이미 전달되었으므로 절대 재시도하지 마십시오." >&2
-        rm -f "$errFile"
-        exit 0
-      fi
-      cat "$errFile" >&2
-      rm -f "$errFile"
+      [[ $rc -ne 127 ]] && version_hint
       echo "mailskill send: 발송 실패 (exit $rc)" >&2
       exit "$rc"
     fi
-    rm -f "$errFile"
-    echo "mailskill send: 발송 완료" >&2
+    if [[ "$verdict" == "sent-save-failed" ]]; then
+      echo "mailskill send: 발송 완료(보낸함 사본 저장만 실패) — 재시도 금지" >&2
+    else
+      echo "mailskill send: 발송 완료" >&2
+    fi
     ;;
   attachment)
     # attachment <acct> <id> [-f <folder>] [dir]
-    # himalaya attachment download 대신 raw export + 파이썬 email 파싱(이슈 #9)
+    # himalaya attachment download 대신 원문(--raw) + 파이썬 email 파싱(이슈 #9).
+    # 2.x 에는 message export 가 없다 — hjson.py raw 가 `message read --raw` 바이트를 파일에 그대로 쓴다.
     [[ $# -ge 2 ]] || { echo "mailskill attachment: <account> 및 <id> 필요" >&2; exit 2; }
     acct="$1"; shift
     id="$1"; shift
     fold=(); outdir="."
     while [[ $# -gt 0 ]]; do
       case "$1" in
-        -f) fold=(-f "${2:?folder}"); shift 2 ;;
+        -f) fold=(-m "${2:?folder}"); shift 2 ;;
         *) outdir="$1"; shift ;;
       esac
     done
@@ -340,19 +398,24 @@ print("\t".join([m.get("to", ""), m.get("subject", ""), m.get("in_reply_to", "")
     trap 'rm -rf "$tmp_dir"' EXIT
     tmp_eml="$tmp_dir/raw.eml"
 
-    errFile="$(mktemp)"
     rc=0
-    "$H" message export "$id" -a "$acct" ${fold[@]+"${fold[@]}"} --full -d "$tmp_eml" 2>"$errFile" || rc=$?
+    hj raw --out "$tmp_eml" -- message read "$id" -a "$acct" ${fold[@]+"${fold[@]}"} || rc=$?
     if [[ $rc -ne 0 ]]; then
-      cat "$errFile" >&2
-      rm -f "$errFile"
-      echo "mailskill attachment: raw eml 내보내기 실패 (exit $rc)" >&2
+      echo "mailskill attachment: 원문(raw eml) 받기 실패 (exit $rc)" >&2
       exit "$rc"
     fi
-    rm -f "$errFile"
 
     run_python "$REPO/scripts/attachment-export.py" --eml "$tmp_eml" --dir "$outdir"
     ;;
-  doctor)   "$H" account doctor "${1:?account}" ;;
+  doctor)
+    # 2.x `account check` 는 백엔드가 FAIL 이어도 exit 0 이다(실측) — rc 로 판정하면 늘 "정상".
+    # hjson.py check 가 백엔드별 결과로 판정한다: stdout 첫 줄 ok|auth|secret|config|network,
+    # 이어서 백엔드별 보고. 실패면 고치는 법을 stderr 로 낸다(문구는 hjson 한 곳 — PS 판과 공유).
+    # doctor 의 exit 는 0 정상 · 1 이상(버전 불일치 포함). mailskill.ps1 과 같다.
+    acct="${1:?account}"
+    config_shadow_warning
+    run_python "$REPO/scripts/hjson.py" version >/dev/null || exit 1
+    run_python "$REPO/scripts/hjson.py" check --account "$acct" || exit 1
+    ;;
   *) echo "mailskill: 알 수 없는 동사 '$cmd'" >&2; usage >&2; exit 2 ;;
 esac

@@ -1,14 +1,15 @@
 ﻿# mailskill setup (Windows / PowerShell) — 회사메일(NAVER WORKS) 1회 설정. bash 판 scripts/mail-setup 과 같은 계약.
 #   1) age 키 보장(없으면 생성) + recipients.txt 에 이 기계 공개키
 #   2) 앱 비밀번호를 숨김 입력(SecureString) -> secret-set 으로 himalaya-<acct>-imap / -smtp 두 이름에 저장
-#   3) 템플릿(config\works.template.toml)으로 이 PC 전용 himalaya config 생성
-#   4) himalaya account doctor 로 auth.cmd -> age 복호 -> IMAP/SMTP 로그인 확인
+#   3) 템플릿(config\works.template.toml, himalaya 2.x 형식)으로 이 PC 전용 himalaya config 생성
+#      (기존 config 가 1.x 형식이면 .bak-v1-<시각> 으로 옮기고 새로 만든다)
+#   4) hjson.py check(himalaya account check) 로 password.command -> age 복호 -> IMAP/SMTP 로그인 확인
 #
 #   mailskill setup [--email <주소>] [--login <아이디>] [--display-name <이름>]
 #                   [--account <이름>] [--password-stdin] [--no-verify]
 #
 # 비밀번호는 인자로 받지 않는다. 화면·로그·평문 파일에 남기지 않는다(age 암호화 저장만).
-# 런타임(himalaya·age)은 설치하지 않는다. 없으면 무엇이 없는지만 알린다(TS-RUNTIME-2).
+# 런타임(himalaya 2.x·age·python)은 설치하지 않는다. 없으면 무엇이 없는지만 알린다(TS-RUNTIME-2).
 # exit: 0 완료 · 1 환경 문제(런타임·키·설정) · 2 사용법 · 3 저장은 됐으나 로그인 확인 실패
 #
 # 화면 출력은 cp949 콘솔에서도 깨지지 않는 글자만 쓴다(TS-WIN-3: ✓ ✗ — 같은 기호 금지).
@@ -59,6 +60,29 @@ function Invoke-Native([string]$exe, [string[]]$argv) {
 function Write-Utf8NoBom([string]$path, [string]$text) {
     [System.IO.File]::WriteAllText($path, $text, (New-Object System.Text.UTF8Encoding($false)))
 }
+# scripts\hjson.py 실행(버전 가드·로그인 판정, #30). mailskill.ps1 의 Get-PythonCmd 와 같은 우선순위:
+# uv 관리 Python 3.12 → python3 → python. 없으면 $null. stdout 은 반환, stderr(안내 두 줄)는 그대로 흘린다.
+function Get-SetupPython {
+    if (Get-Command uv -ErrorAction SilentlyContinue) {
+        $ErrorActionPreference = 'Continue'
+        $null = & uv python find 3.12 2>$null
+        if ($LASTEXITCODE -eq 0) { return , @('uv', 'run', '--no-project', '-q', '--no-python-downloads', '--python', '3.12') }
+    }
+    foreach ($p in @('python3', 'python')) { if (Get-Command $p -ErrorAction SilentlyContinue) { return , @($p) } }
+    return $null
+}
+function Invoke-Hjson([string[]]$argv) {
+    # EAP=Stop 이면 PS 5.1 이 python 의 stderr(안내 두 줄)를 종료 에러로 승격할 수 있다 → 이 함수 안에서만 Continue.
+    $ErrorActionPreference = 'Continue'
+    $py = Get-SetupPython
+    $exe = $py[0]; $pre = @(); if ($py.Count -gt 1) { $pre = $py[1..($py.Count - 1)] }
+    $env:PYTHONUTF8 = '1'; $env:PYTHONIOENCODING = 'utf-8'
+    $prev = $null
+    try { $prev = [Console]::OutputEncoding; [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false } catch { $prev = $null }
+    try { $out = & $exe @pre (Join-Path $repo 'scripts\hjson.py') @argv; $code = $LASTEXITCODE }
+    finally { if ($null -ne $prev) { try { [Console]::OutputEncoding = $prev } catch {} } }
+    return [pscustomobject]@{ Code = $code; Out = (@($out) -join "`n") }
+}
 
 # ── 인자 ───────────────────────────────────────────────────────────────────
 $acct = 'ji'; $email = ''; $login = ''; $dname = ''; $pwStdin = $false; $verify = $true
@@ -81,8 +105,16 @@ if ($acct -cnotmatch '^[a-z0-9][a-z0-9-]*$') { Fail "계정 이름은 영문 소
 
 # ── 0) 런타임 탐지(설치는 하지 않음) ─────────────────────────────────────────
 $missing = @($H, 'age', 'age-keygen') | Where-Object { -not (Get-Command $_ -ErrorAction SilentlyContinue) }
+if (-not (Get-SetupPython)) { $missing = @($missing) + 'python' }
 if ($missing) {
     Fail "필요한 프로그램이 없습니다: $($missing -join ', ')" 'jaix setup 이 설치합니다. jaix setup 을 먼저 실행한 뒤 다시 하세요.'
+}
+# 버전 가드: himalaya 2.2.x 만(설정 형식이 1.x 와 다르고, 2.3 이후엔 BREAKING 예정). 안내문은 hjson.py 가 stderr 로 낸다.
+$env:NO_COLOR = '1'; $env:RUST_LOG = 'off'
+$v = Invoke-Hjson @('version')
+if ($v.Code -ne 0) {
+    # 원인 문구("지원하지 않는 himalaya 버전 ...")는 hjson.py 가 stderr 로 이미 냈다. 여기선 종료만.
+    exit 1
 }
 # 비밀번호는 사람이 직접 연 창에서 넣는다. 에이전트 도구처럼 입력이 리다이렉트된 곳에서는
 # 숨김 입력이 불가능하므로 시작 전에 멈춘다(--password-stdin 은 자동화·테스트용).
@@ -188,11 +220,29 @@ function Get-Rendered {
 $confDir = Split-Path -Parent $conf
 if (-not (Test-Path -LiteralPath $confDir)) { New-Item -ItemType Directory -Path $confDir -Force | Out-Null }
 $hasAcct = { param($p) [regex]::IsMatch([System.IO.File]::ReadAllText($p, [System.Text.Encoding]::UTF8), "(?m)^\[accounts\.$([regex]::Escape($acct))\]") }
+# himalaya 1.x 형식(bash 판 is_v1 과 같은 규칙) — 2.x 는 이 키를 무시하고 실행 시 실패한다. 셋 중 하나라도 있으면 1.x:
+#   ① 점 키 backend.(type|host|port|login|auth|encryption) (앞에 send.·message.send. 포함)
+#   ② 표 머리 [accounts.X.backend]·[accounts.X.message.send.backend] (하위 표 .auth 등 포함)  ③ 인라인 표 backend = { … }
+$isV1 = { param($p) [regex]::IsMatch([System.IO.File]::ReadAllText($p, [System.Text.Encoding]::UTF8), '(?m)^[ \t]*((message\.)?send\.)?backend\.(type|host|port|login|auth|encryption)|^[ \t]*\[accounts\.[^\]]*\.backend(\.[^\]]*)?\]|^[ \t]*((message\.)?send\.)?backend[ \t]*=[ \t]*\{') }
 $item = Get-Item -LiteralPath $conf -Force -ErrorAction SilentlyContinue
 if ($item -and ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
     # 링크는 대개 저장소의 공용 설정을 가리킨다. 남의 파일을 고치지 않는다.
+    if ((Test-Path -LiteralPath $conf) -and (& $isV1 $conf)) {
+        Fail "$conf 가 가리키는 설정이 himalaya 1.x 형식이라 2.x 에서 읽히지 않습니다(링크라 고치지 않았습니다)." "링크 대상 파일을 2.x 형식으로 옮기거나 링크를 지운 뒤 다시 실행하세요."
+    }
     if ((Test-Path -LiteralPath $conf) -and (& $hasAcct $conf)) { Say "[완료] 기존 설정을 그대로 씁니다: $conf" }
     else { Fail "$conf 가 다른 파일을 가리키는 링크라 고치지 않았습니다." "그 파일에 [accounts.$acct] 블록을 직접 넣거나 링크를 지운 뒤 다시 실행하세요." }
+}
+elseif ($item -and (& $isV1 $conf)) {
+    # 1.x 설정은 계정 블록 단위로 섞어 쓸 수 없다(파일 전체가 2.x 로 읽힌다) → 통째로 백업하고 새로 만든다.
+    $bak = "$conf.bak-v1-$(Get-Date -Format yyyyMMddHHmmss)"
+    Move-Item -LiteralPath $conf -Destination $bak
+    Write-Utf8NoBom $conf (Get-Rendered)
+    Say "[완료] 예전(himalaya 1.x) 설정을 옮겨 두고 새로 만들었습니다: $conf (예전 것: $bak)"
+    # 최상위 [accounts.X] 만 계정으로 센다(점이 든 하위 표 [accounts.X.backend] 등은 계정이 아님).
+    $others = @([regex]::Matches([System.IO.File]::ReadAllText($bak, [System.Text.Encoding]::UTF8), '(?m)^\[accounts\.[^\].]+\]') |
+        ForEach-Object { $_.Value } | Where-Object { $_ -ne "[accounts.$acct]" })
+    if ($others.Count) { Say "  그 파일의 다른 계정($($others -join ' '))은 옮기지 않았습니다 - 필요하면 2.x 형식으로 직접 옮기세요." }
 }
 elseif (-not $item) {
     Write-Utf8NoBom $conf (Get-Rendered)
@@ -208,31 +258,29 @@ else {
     Say "[완료] 기존 설정 끝에 '$acct' 계정을 덧붙였습니다(백업 .bak-*): $conf"
 }
 
-# ── 5) 확인: auth.cmd -> age 복호 -> IMAP/SMTP 로그인 ───────────────────────
+# himalaya 2.x 는 %APPDATA%\himalaya\config.toml 을 ~\.config 보다 먼저 읽는다. 그 파일이 있으면 방금 만든
+# 설정이 조용히 가려진다(Windows 에선 -c 절대경로를 못 써서 경로로 우회할 수도 없다, #30).
+$appConf = if ($env:APPDATA) { Join-Path $env:APPDATA 'himalaya\config.toml' } else { $null }
+if (-not $env:HIMALAYA_CONFIG -and $appConf -and (Test-Path -LiteralPath $appConf) -and ((Resolve-Path -LiteralPath $appConf).Path -ne (Resolve-Path -LiteralPath $conf).Path)) {
+    Say "[주의] $appConf 가 있어서 메일 프로그램은 그 파일을 먼저 읽습니다. 방금 만든 $conf 는 쓰이지 않습니다."
+    Say "  -> $appConf 를 다른 이름으로 바꾸거나 지운 뒤 'mailskill doctor $acct' 로 확인하세요."
+}
+
+# ── 5) 확인: password.command -> age 복호 -> IMAP/SMTP 로그인 ─────────────────
 if (-not $verify) { Say "[안내] 로그인 확인은 건너뛰었습니다(--no-verify). 나중에: mailskill doctor $acct"; exit 0 }
 if (-not (Get-Command 'mail-secret' -ErrorAction SilentlyContinue)) {
     Fail 'mail-secret 명령을 찾을 수 없어 메일 프로그램이 비밀번호를 못 읽습니다.' "jaix setup 을 다시 실행해 PATH 를 잡은 뒤 'mailskill doctor $acct' 로 확인하세요." 3
 }
-$env:NO_COLOR = '1'; $env:RUST_LOG = 'off'
-$r = Invoke-Native $H @('account', 'doctor', $acct)
-if ($r.Code -eq 0) {
+# 판정은 hjson.py check 가 한다(bash 판과 공통): 2.x account check 는 백엔드가 FAIL 이어도 exit 0 이라
+# 출력으로 가려야 한다. stdout 첫 줄 ok|auth|secret|config|network + 백엔드별 보고, 실패면 exit 3 과
+# stderr 에 "문장 / -> 고치는 법" 두 줄(문구 정본은 hjson.py).
+$r = Invoke-Hjson @('check', '--account', $acct, '--doc', $howto)
+$lines = @($r.Out -split "`n" | Where-Object { $_.Trim() })
+$verdict = if ($lines.Count) { $lines[0].Trim() } else { '' }
+foreach ($l in ($lines | Select-Object -Skip 1)) { Say "    $l" }
+if ($r.Code -eq 0 -and $verdict -eq 'ok') {
     Say "[완료] 로그인 확인 완료. 이제 '$acct' 계정으로 메일을 읽고 보낼 수 있습니다."
     exit 0
 }
-$tail = @($r.Text -split "`n" | ForEach-Object { $_ -replace '\x1b\[[0-9;]*m', '' } | Where-Object { $_.Trim() -and $_ -notmatch '^\s*Note' }) | Select-Object -Last 4
-foreach ($l in $tail) { Say "    $l" }
-# himalaya 가 비호환 버전(예: 2.x)이면 account doctor 가 네트워크가 아니라 CLI 파싱에서
-# 깨진다(clap: "error: unexpected argument" · "unrecognized subcommand" · "Usage: ..."). 이걸
-# 네트워크 실패로 뭉뚱그리면 엉뚱한 곳(웍스 관리자·방화벽)을 보게 되므로 따로 가려낸다.
-if ($r.Text -match "(?i)usage:|unexpected argument|unrecognized subcommand|wasn.t expected|isn.t expected|invalid (value|subcommand)") {
-    Fail 'himalaya 버전/사용법 오류 — 설치된 himalaya 가 1.2.0 과 호환되지 않는 버전일 수 있습니다(2.x 는 비호환).' "'himalaya --version' 으로 1.2.0 인지 확인하고, 아니면 jaix 로 1.2.0 을 다시 설치하세요(jaix setup)." 3
-}
-elseif ($r.Text -match '(?i)authentication failed') {
-    Fail '로그인 실패: 아이디 또는 앱 비밀번호가 틀렸습니다.' "앱 비밀번호를 새로 발급해 'mailskill setup' 을 다시 실행하세요($howto)." 3
-}
-elseif ($r.Text -match '(?i)mail-secret|cannot (run|execute)|not recognized|password') {
-    Fail '메일 프로그램이 저장된 비밀번호를 읽지 못했습니다.' "'mailskill doctor $acct' 로 다시 확인하고, 계속되면 관리자에게 위 내용을 보내세요." 3
-}
-else {
-    Fail '메일 서버에 접속하지 못했습니다(네트워크 또는 IMAP/SMTP 사용 허용 여부).' '회사망·인터넷 연결을 확인하고, 계속되면 웍스 관리자에게 IMAP/SMTP 허용을 요청하세요.' 3
-}
+if ($r.Code -eq 3) { exit 3 }   # 원인·고치는 법은 hjson.py 가 이미 stderr 로 냈다
+Fail "로그인 확인을 끝내지 못했습니다(판정 도구 exit $($r.Code))." "'mailskill doctor $acct' 로 다시 확인하고, 계속되면 관리자에게 위 내용을 보내세요." 3

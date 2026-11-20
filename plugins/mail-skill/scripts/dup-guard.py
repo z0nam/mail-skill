@@ -14,34 +14,18 @@ import argparse
 import json
 import os
 import re
-import subprocess
 import sys
 from datetime import datetime, timezone
 from email.utils import getaddresses, parsedate_to_datetime
 from pathlib import Path
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import hjson  # noqa: E402
+
 
 def himalaya_config_args(config_path):
-    """himalaya 에 넘길 `-c` 인자. 기본 탐색으로 같은 파일을 찾으면 `-c` 를 아예 주지 않는다.
-
-    himalaya 1.2.0 Windows 는 config 를 **절대경로로** 받으면(-c 든 HIMALAYA_CONFIG 든)
-    auth.cmd 단계에서 멈춘다(실측). 기본 탐색(~/.config/himalaya/config.toml)은 정상이고,
-    셋업은 늘 그 위치에 쓰므로 그 경우엔 `-c` 를 빼서 어댑터의 다른 동사와 같은 경로를 탄다.
-    기본 위치가 아닌 config(저장소 폴백 등)만 예전처럼 `-c` 로 명시한다.
-    """
-    if not config_path or not Path(config_path).is_file():
-        return []
-    target = Path(config_path).resolve()
-    defaults = [Path.home() / ".config" / "himalaya" / "config.toml"]
-    if os.environ.get("HIMALAYA_CONFIG"):
-        defaults.append(Path(os.environ["HIMALAYA_CONFIG"]))  # himalaya 가 env 로 스스로 읽는다
-    for d in defaults:
-        try:
-            if d.is_file() and d.resolve() == target:
-                return []
-        except OSError:
-            pass
-    return ["-c", config_path]
+    """himalaya 에 넘길 `-c` 인자 — 규칙은 hjson.config_args 한 곳에 있다(':' 분할·가림·상대경로)."""
+    return hjson.config_args(config_path)
 
 
 def parse_date(date_str):
@@ -119,54 +103,55 @@ def extract_addrs(to_field):
 
 
 def find_sent_folder(account, himalaya_bin, config_path=None):
-    """himalaya folder list 로 보낸편지함 폴더명을 탐색."""
-    cmd = [himalaya_bin, "folder", "list", "-a", account, "-o", "json"]
-    cmd.extend(himalaya_config_args(config_path))
+    """보낸편지함 폴더명을 찾는다(2.x mailbox list).
+
+    1) role == sent (2.x. IMAP 은 서버가 role 을 안 주지만 config 의 mailbox.alias.sent 가 role 을 덮어쓴다)
+    2) desc 에 \\Sent (1.x 모양과의 호환)
+    3) 흔한 이름
+    """
     try:
-        res = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", check=False)
-        if res.returncode == 0:
-            folders = json.loads(res.stdout)
-            # 1) desc 에 \Sent 가 있는 폴더 우선
-            for f in folders:
-                desc = f.get("desc", "").lower()
-                if "\\sent" in desc:
-                    return f.get("name")
-            # 2) 이름 매칭
-            for f in folders:
-                name = f.get("name", "")
-                if name.lower() in ["sent messages", "sent", "sent mail", "보낸편지함", "[gmail]/sent mail"]:
-                    return name
-    except Exception:
-        pass
+        folders = hjson.folders(hjson.run_json(["mailbox", "list", "-a", account]
+                                               + himalaya_config_args(config_path), hbin=himalaya_bin))
+    except hjson.BackendError:
+        folders = []
+    for f in folders:
+        if (f.get("role") or "").lower() == "sent":
+            return f.get("name")
+    for f in folders:
+        if "\\sent" in (f.get("desc") or "").lower():
+            return f.get("name")
+    for f in folders:
+        name = f.get("name") or ""
+        if name.lower() in ["sent messages", "sent", "sent mail", "보낸편지함", "보낸메일함", "[gmail]/sent mail"]:
+            return name
     return "Sent Messages"
 
 
 def get_sent_envelopes(account, folder, himalaya_bin, window_sec, config_path=None):
-    """보낸편지함에서 최근 window 시간 내의 모든 envelope 목록을 가져온다 (가장 오래된 메일이 window 밖으로 나갈 때까지 페이지 확대)."""
+    """보낸편지함에서 최근 window 시간 내의 envelope 목록(가장 오래된 메일이 window 밖으로 나갈 때까지 페이지 확대).
+
+    조회 실패는 빈 목록 - 가드는 발송을 막지 않는다(기존 동작 유지).
+    """
     now_utc = datetime.now(timezone.utc)
     envelopes = []
     for psize in [20, 100, 500]:
-        cmd = [himalaya_bin, "envelope", "list", "-a", account, "-f", folder, "--page-size", str(psize), "-o", "json"]
-        cmd.extend(himalaya_config_args(config_path))
+        args = ["envelope", "list", "-a", account, "-m", folder, "-s", str(psize)] + himalaya_config_args(config_path)
         try:
-            res = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", check=False)
-            if res.returncode != 0:
-                break
-            envelopes = json.loads(res.stdout)
-            if not envelopes or not isinstance(envelopes, list):
-                return []
-            oldest_dt = None
-            for env in reversed(envelopes):
-                dt = parse_date(env.get("date"))
-                if dt:
-                    oldest_dt = dt
-                    break
-            if oldest_dt and (now_utc - oldest_dt).total_seconds() > window_sec:
-                return envelopes
-            if len(envelopes) < psize:
-                return envelopes
-        except Exception:
+            envelopes = hjson.envelopes(hjson.run_json(args, hbin=himalaya_bin))
+        except hjson.BackendError:
             break
+        if not envelopes:
+            return []
+        oldest_dt = None
+        for env in reversed(envelopes):
+            dt = parse_date(env.get("date"))
+            if dt:
+                oldest_dt = dt
+                break
+        if oldest_dt and (now_utc - oldest_dt).total_seconds() > window_sec:
+            return envelopes
+        if len(envelopes) < psize:
+            return envelopes
     return envelopes
 
 
@@ -194,12 +179,16 @@ def main():
         else:
             raw = Path(a.mock_envelopes).read_text(encoding="utf-8")
         try:
-            envelopes = json.loads(raw)
+            envelopes = hjson.envelopes(json.loads(raw))  # 1.x 배열·2.x 객체 모두
         except Exception as e:
             sys.exit(f"dup-guard: mock JSON 파싱 오류: {e}")
     else:
-        sent_folder = a.sent_folder or find_sent_folder(a.account, h_bin, a.config)
-        envelopes = get_sent_envelopes(a.account, sent_folder, h_bin, window_sec, a.config)
+        try:
+            sent_folder = a.sent_folder or find_sent_folder(a.account, h_bin, a.config)
+            envelopes = get_sent_envelopes(a.account, sent_folder, h_bin, window_sec, a.config)
+        except hjson.ConfigPathError as e:
+            # 조회 실패는 보통 통과시키지만, 이건 himalaya 가 엉뚱한 config 로 보낼 수 있다는 뜻이라 막는다.
+            sys.exit(f"dup-guard: {e}")
 
     if not isinstance(envelopes, list) or not envelopes:
         # 보낸편지함 조회 실패 또는 비어있음 -> 정상 통과 (발송 차단 안 함)

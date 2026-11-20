@@ -1,26 +1,24 @@
-# Himalaya 계정 템플릿 — NAVER WORKS(웍스모바일) 회사메일.
+# Himalaya 2.x 계정 템플릿 — NAVER WORKS(웍스모바일) 회사메일.
 # `mailskill setup` 이 __이름__ 자리를 채워 사용자 PC 에만 config.toml 을 만든다.
 # 채운 결과(개인 이메일·로그인)는 로컬 전용 — 저장소에 커밋하지 않는다.
-# 비밀번호는 여기 없다: auth.cmd 가 age 암호화 파일에서 꺼낸다(mail-secret).
+# 비밀번호는 여기 없다: password.command 가 age 암호화 파일에서 꺼낸다(mail-secret).
+#   이 문자열은 Unix 에선 /bin/sh -c, Windows 에선 cmd /C 로 실행된다 — PATH 의 mail-secret(.cmd) 을 찾는다.
 # 웍스는 IMAP·SMTP 가 같은 앱 비밀번호를 쓰지만, 이름은 둘로 나눠 둔다(제공사 차이 흡수).
+# 1.x 형식(backend.type = ...)은 2.x 가 읽지 않는다 — 이 템플릿은 2.x 전용이다.
+# 보낸함 사본: save-copy 를 켜지 않는다. 웍스는 SMTP 로 보낸 메일을 서버가 "Sent Messages" 에
+#   자동 저장한다(#30 실측: 미설정으로 1통 발송 → 사본 1통). 켜면 사본이 2통이 된다 — 1.x 에서
+#   ji 계정 보낸함 사본이 2건씩 생기던 원인이다. 중복 발송 확인(dup-guard)은 이 서버 사본을 본다.
 
 [accounts.__ACCOUNT__]
 default = true
 email = "__EMAIL__"
 display-name = "__DISPLAY_NAME__"
 
-backend.type = "imap"
-backend.host = "imap.worksmobile.com"
-backend.port = 993
-backend.encryption.type = "tls"
-backend.login = "__LOGIN__"
-backend.auth.type = "password"
-backend.auth.cmd = "mail-secret himalaya-__ACCOUNT__-imap"
+imap.server = "imaps://imap.worksmobile.com:993"
+imap.sasl.plain.username = "__LOGIN__"
+imap.sasl.plain.password.command = "mail-secret himalaya-__ACCOUNT__-imap"
 
-message.send.backend.type = "smtp"
-message.send.backend.host = "smtp.worksmobile.com"
-message.send.backend.port = 587
-message.send.backend.encryption.type = "start-tls"
-message.send.backend.login = "__LOGIN__"
-message.send.backend.auth.type = "password"
-message.send.backend.auth.cmd = "mail-secret himalaya-__ACCOUNT__-smtp"
+smtp.server = "smtp://smtp.worksmobile.com:587"
+smtp.starttls = true
+smtp.sasl.plain.username = "__LOGIN__"
+smtp.sasl.plain.password.command = "mail-secret himalaya-__ACCOUNT__-smtp"

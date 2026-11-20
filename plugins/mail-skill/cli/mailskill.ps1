@@ -3,7 +3,10 @@
 #   mailskill accounts                     계정 목록 (JSON)
 #   mailskill folders <acct>               폴더 목록 (JSON)
 #   mailskill list    <acct> [-f <폴더>] [n]        최근 n통 (JSON, 기본 20)
-#   mailskill search  <acct> [-f <폴더>] <query...> IMAP 쿼리 검색 (JSON)
+#   mailskill search  <acct> [-f <폴더>] <query...> 검색 (JSON). himalaya 쿼리 DSL 또는 맨 키워드
+#   mailskill search  gmail from koreanair.com and after 2026-11-01   예: DSL(첫 낱말이 not/date/before/after/from/to/subject/body/flag/order/괄호)은 그대로
+#   mailskill search  gmail 대한항공 항공권   예: 맨 키워드 → (subject 대한항공 or body 대한항공) and (subject 항공권 or body 항공권)
+#   mailskill search  gmail "hello world"     예: 따옴표로 묶은 한 인자는 구(phrase) 하나로 → subject hello\ world or body hello\ world
 #   mailskill read    <acct> <id> [folder] 메시지 읽기 (JSON)
 #   mailskill reply   <acct> <id>          회신(초안) — 발송 전 사용자 승인 필수
 #   mailskill send    <acct> [옵션]        메일 발송/답장(첨부 가능) — 기본 미리보기, --send 로 실전송
@@ -22,6 +25,8 @@ $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
 $H = if ($env:HIMALAYA_BIN) { $env:HIMALAYA_BIN } else { 'himalaya' }
 $env:RUST_LOG = if ($env:MAILSKILL_LOG) { $env:MAILSKILL_LOG } else { 'off' }
+# 색 끄기 요청. 백엔드 에러 원문의 ANSI 색·안내 꼬리는 hjson.py(실행 모드)가 걷어낸다.
+$env:NO_COLOR = '1'
 
 # 이 스크립트의 실제 위치(심링크/복사 모두) → REPO(scripts/ 를 찾기 위함).
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -68,11 +73,16 @@ function Get-PythonCmd {
     Fail 'mailskill: uv 또는 python(3)을 찾을 수 없습니다' 1
 }
 
-function Invoke-Python {
+# python 헬퍼 실행. stderr 는 2>&1 로 합쳐 ErrorRecord 만 .Exception.Message(원문)로 [Console]::Error 에
+# 다시 쓰고, 나머지(stdout)는 그대로 흘린다(#27 방식 D). 파일 EAP=Stop 에서 네이티브 stderr 가
+# 리다이렉트되면 PS 5.1 이 "uv.exe : …" NativeCommandError 로 승격해 rc 를 읽기 전에 멈추므로
+# (dup-guard 가 경고를 쓰고 exit 3 → 미리보기 대신 exit 1, #30 실기) 함수 안에서만 EAP=Continue.
+# $quietErr 면 stderr 를 버린다(미리보기의 dup-guard — bash 판 >/dev/null 2>&1 과 같음).
+function Invoke-PythonCore([bool]$quietErr, [object[]]$pyArgs) {
     $cmd = Get-PythonCmd
     $exe = $cmd[0]
     $prefix = Tail $cmd 1
-    $allArgs = @($prefix) + @($args)
+    $allArgs = @($prefix) + @($pyArgs)
     # 한글 Windows 는 python 기본 인코딩이 cp949 라 himalaya 의 UTF-8 출력을 읽다 깨진다.
     # 자식 python 의 입출력·subprocess 기본을 UTF-8 로 고정하고, 그 UTF-8 stdout 을
     # PowerShell 이 cp949 로 잘못 읽지 않도록 호출 동안만 콘솔 출력 인코딩도 UTF-8 로 맞춘다.
@@ -80,9 +90,18 @@ function Invoke-Python {
     $env:PYTHONIOENCODING = 'utf-8'
     $prevOutEnc = $null
     try { $prevOutEnc = [Console]::OutputEncoding; [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false } catch { $prevOutEnc = $null }
-    try { & $exe @allArgs }
+    $ErrorActionPreference = 'Continue'
+    try {
+        & $exe @allArgs 2>&1 | ForEach-Object {
+            if ($_ -is [System.Management.Automation.ErrorRecord]) {
+                if (-not $quietErr) { [Console]::Error.WriteLine($_.Exception.Message) }
+            } else { $_ }
+        }
+    }
     finally { if ($null -ne $prevOutEnc) { try { [Console]::OutputEncoding = $prevOutEnc } catch {} } }
 }
+function Invoke-Python { Invoke-PythonCore $false $args }
+function Invoke-PythonQuiet { Invoke-PythonCore $true $args }
 
 function Get-PythonExe {
     # 구버전 호환용 (단일 실행파일 이름 반환)
@@ -92,41 +111,83 @@ function Get-PythonExe {
     Fail 'mailskill: python 을 찾을 수 없습니다' 1
 }
 
-# json_verb 등가 — JSON 동사 공통 래퍼.
-# 백엔드 stdout 이 JSON 으로 확인된 경우에만 통과. 실패는 stderr + 비정상 종료.
-# himalaya 가 0건에서 "page out of bounds" 로 죽는 케이스는 빈 결과([])로 승격.
-function Invoke-Json([string[]]$BackendArgs) {
-    # PS 5.1 은 네이티브 stderr 를 2>파일/2>&1 어느 쪽으로 받든 각 줄을 ErrorRecord 로 렌더해
-    # "himalaya.exe : Error:" + 위치/CategoryInfo(RemoteException)/NativeCommandError 노이즈를
-    # 붙인다(Windows PS 5.1 실측). 2>&1 로 합친 뒤 ErrorRecord 는 .Exception.Message(원문)로, 나머지는
-    # 네이티브 stdout 으로 분리한다 — stdout(JSON)은 깨끗하게 보존되고(JSON 계약 필수), himalaya 가
-    # 성공 경로에서 stderr 로 내는 진행 메시지("Checking…")도 ErrorRecord 라 JSON 에 안 섞인다.
-    # 파일 EAP=Stop 에서 2>&1 로 stderr 가 흘러오면(예: 0건의 "page out of bounds") PS 5.1 은
-    # 종료 에러로 승격해 $LASTEXITCODE 를 읽기 전에 throw 한다 → 이 함수 안에서만 Continue 로 낮춘다.
-    $ErrorActionPreference = 'Continue'
-    $merged = & $H @BackendArgs 2>&1
+# search 인자를 himalaya 쿼리로 바꾼다(bash 판 search_query 와 같은 규칙 — 한쪽만 고치지 말 것).
+# 첫 낱말(앞쪽 '(' 제외)이 himalaya DSL 키워드면 그대로(대소문자 무시 — 대문자 오타는
+# himalaya 파스 에러가 그대로 보이게). 아니면 맨 키워드로 보고 인자마다 "subject <kw> or body <kw>"
+# 로 감싸 and 로 잇는다(#25). 인자 안의 공백·괄호·역슬래시는 역슬래시로 이스케이프 — himalaya
+# 패턴에서 따옴표는 글자 그대로라 구를 못 묶고, '\ ' 이스케이프는 받는다(실측). 인자를 감싼
+# 바깥 큰따옴표 한 쌍은 벗긴다. body 가 든 OR 묶음의 분해·합집합은 search.py 몫(웍스 BODY 0건, #30).
+function ConvertTo-SearchQuery([string[]]$q) {
+    if ($null -eq $q -or $q.Count -eq 0) { return , @() }
+    # 첫 인자의 첫 낱말로 판정한다 — "subject hello" 처럼 DSL 전체를 한 인자로 넘기는 호출도 있다.
+    $first = (([string]$q[0]).TrimStart().TrimStart('(') -split '\s', 2)[0].ToLowerInvariant()
+    if ($first -in @('', 'not', 'date', 'before', 'after', 'from', 'to', 'subject', 'body', 'flag', 'order')) {
+        return , @($q)
+    }
+    $terms = @()
+    foreach ($kw in $q) {
+        $k = [string]$kw
+        if ($k.Length -ge 2 -and $k.StartsWith('"') -and $k.EndsWith('"')) { $k = $k.Substring(1, $k.Length - 2) }
+        if (-not $k.Trim()) { continue }
+        $terms += ($k -replace '([\\ ()])', '\$1')
+    }
+    if ($terms.Count -eq 1) { return , @('subject', $terms[0], 'or', 'body', $terms[0]) }
+    $out = @()
+    foreach ($t in $terms) {
+        if ($out.Count -gt 0) { $out += 'and' }
+        $out += @('(subject', $t, 'or', 'body', "$t)")
+    }
+    return , $out
+}
+
+# himalaya 2.x 호출은 전부 scripts\hjson.py 를 거친다(#30). python 이 himalaya 를 직접 실행해
+# 출력을 바이트로 받으므로 PS 5.1 파이프의 바이트·cp949 왜곡이 끼지 않는다. 2.x 는 에러를 stdout 으로
+# 내는데, hjson 이 그걸 꺼내 stderr 로 옮기고 stdout 을 비운 채 같은 rc 로 끝낸다 — 그래서 여기서는
+# stderr 를 가로채지 않고 그대로 흘린다(2>파일 로 받지 않는다. PS 5.1 ErrorRecord 노이즈, #27).
+# 반환: stdout 텍스트. 실패(rc≠0)면 버전 안내(Show-VersionHint)를 한 번 낸 뒤 그 rc 로 바로 끝낸다.
+function Invoke-Hjson([string]$kind, [string[]]$BackendArgs) {
+    $hjson = Join-Path $REPO 'scripts\hjson.py'
+    $out = Invoke-Python $hjson $kind '--' @BackendArgs
     $rc = $LASTEXITCODE
-    $outLines = @(); $errLines = @()
-    foreach ($line in $merged) {
-        if ($line -is [System.Management.Automation.ErrorRecord]) { $errLines += [string]$line.Exception.Message }
-        else { $outLines += [string]$line }
+    if ($rc -ne 0) { if ($rc -ne 127) { Show-VersionHint }; exit $rc }
+    return (@($out) -join "`n")
+}
+
+# 백엔드 호출이 실패했을 때만(실행 파일 없음 127 제외) 버전 가드를 한 번 돌린다(bash 판 version_hint 와 같음).
+# 1.x 가 깔려 있으면 2.x 전용 플래그(--json 등)에서 사용법 에러로 깨지는데, 그 원문만으로는 원인을 알기 어렵다.
+# 성공 경로에는 비용이 없다. 안내 문구는 hjson.py version 이 stderr 로 낸다(stdout 판정 한 단어는 버린다).
+function Show-VersionHint {
+    $null = Invoke-Python (Join-Path $REPO 'scripts\hjson.py') version
+}
+
+# 사용자 인자 -f <폴더> → himalaya 2.x 의 -m <폴더>. 사용자 계약(-f)은 1.x 와 같게 둔다.
+function ConvertTo-MailboxArgs([string]$folder) {
+    if ($folder) { return , @('-m', $folder) }
+    return , @()
+}
+
+# himalaya 2.x 가 실제로 읽는 config 경로(기본 탐색 순서). Windows 에서는 -c / HIMALAYA_CONFIG 에
+# 절대경로를 주지 않는다 — clap 이 ':' 로 쪼개 'C' 와 '\Users\...' 둘로 갈라진다(#30). 그래서
+# 어댑터는 경로를 넘기지 않고 이 순서를 흉내 내 "어느 파일이 읽히는지"만 안다(compose-mime 의 From).
+#   1) %APPDATA%\himalaya\config.toml   2) ~\.config\himalaya\config.toml   3) ~\.himalayarc
+function Get-HimalayaConfigCandidates {
+    $c = @()
+    if ($env:APPDATA) { $c += (Join-Path $env:APPDATA 'himalaya\config.toml') }
+    $c += (Join-Path $HOME '.config\himalaya\config.toml')
+    $c += (Join-Path $HOME '.himalayarc')
+    return , $c
+}
+function Resolve-HimalayaConfig {
+    if ($env:HIMALAYA_CONFIG) { return $env:HIMALAYA_CONFIG }
+    foreach ($p in (Get-HimalayaConfigCandidates)) { if (Test-Path -LiteralPath $p) { return $p } }
+    return (Join-Path $REPO 'config\config.toml')
+}
+# %APPDATA% 쪽 파일이 있으면 setup 이 쓰는 ~\.config 쪽은 읽히지 않는다(조용히 가려짐). 경고만 한다.
+function Write-ConfigShadowWarning {
+    $c = Get-HimalayaConfigCandidates
+    if ($env:APPDATA -and (Test-Path -LiteralPath $c[0]) -and (Test-Path -LiteralPath $c[1])) {
+        [Console]::Error.WriteLine("mailskill: [주의] $($c[0]) 가 있어서 $($c[1]) 는 읽히지 않습니다(himalaya 2.x 는 %APPDATA% 쪽을 먼저 씁니다). 하나만 남기세요.")
     }
-    $errText = ($errLines -join "`n")
-    if ($rc -ne 0) {
-        if ($errText -match 'out of bounds') { return '[]' }
-        if ($errText) { [Console]::Error.WriteLine($errText) }
-        Fail "mailskill: backend failed (exit $rc): $($BackendArgs -join ' ')" $rc
-    }
-    if ($env:MAILSKILL_LOG -and $errText) { [Console]::Error.WriteLine($errText) }
-    $text = ($outLines -join "`n")
-    $trimmed = $text.TrimStart()
-    # 첫 글자가 '[' '{' '"' 중 하나여야 JSON. '"' 를 받는 이유: himalaya v1.2.0 의
-    # `message read -o json` 은 메시지 전체를 JSON 문자열 스칼라 하나로 낸다.
-    # 배열·객체만 허용하면 이 멀쩡한 출력이 반려돼 read 가 구조적으로 늘 실패한다.
-    if (-not $trimmed -or ($trimmed[0] -ne '[' -and $trimmed[0] -ne '{' -and $trimmed[0] -ne '"')) {
-        Fail "mailskill: backend produced non-JSON stdout (see stderr above): $($BackendArgs -join ' ')" 1
-    }
-    return $text
 }
 
 # 사용법은 이 파일 맨 위 계약 주석에서 뽑는다 — 두 군데에 적어두면 갈라진다.
@@ -165,7 +226,8 @@ switch ($cmd) {
             [Console]::Error.WriteLine("mailskill: backend '$H' not found in PATH — returning []")
             Emit '[]'; exit 0
         }
-        $out = & $H account list -o json 2>$null
+        # 계정 목록은 "조회 실패여도 [] + exit 0" 계약이라 Invoke-Hjson(실패=즉시 종료)을 쓰지 않는다.
+        $out = Invoke-Python (Join-Path $REPO 'scripts\hjson.py') accounts '--' account list
         if ($LASTEXITCODE -ne 0) {
             [Console]::Error.WriteLine("mailskill: '$H account list' failed — returning []")
             Emit '[]'; exit 0
@@ -176,70 +238,52 @@ switch ($cmd) {
     }
     'folders' {
         $acct = Req $rest[0] 'account'
-        Emit (Invoke-Json @('folder', 'list', '-a', $acct, '-o', 'json')); exit 0
+        Emit (Invoke-Hjson 'folders' @('mailbox', 'list', '-a', $acct)); exit 0
     }
     'list' {
         $acct = Req $rest[0] 'account'
         $q = Tail $rest 1
         $foldArgs = @()
-        if ($q.Count -ge 1 -and $q[0] -eq '-f') { $foldArgs = @('-f', (Req $q[1] 'folder')); $q = Tail $q 2 }
+        if ($q.Count -ge 1 -and $q[0] -eq '-f') { $foldArgs = ConvertTo-MailboxArgs (Req $q[1] 'folder'); $q = Tail $q 2 }
         $n = if ($q.Count -ge 1) { $q[0] } else { '20' }
-        Emit (Invoke-Json (@('envelope', 'list', '-a', $acct) + $foldArgs + @('--page-size', $n, '-o', 'json'))); exit 0
+        Emit (Invoke-Hjson 'envelopes' (@('envelope', 'list', '-a', $acct) + $foldArgs + @('-s', $n, '--has-attachment'))); exit 0
     }
     'search' {
         $acct = Req $rest[0] 'account'
         $q = Tail $rest 1
-        $foldArgs = @(); $foldName = '-'
-        if ($q.Count -ge 1 -and $q[0] -eq '-f') { $foldArgs = @('-f', (Req $q[1] 'folder')); $foldName = $q[1]; $q = Tail $q 2 }
-        $query = $q
-
-        # himalaya 기본 페이지 크기(10)에 조용히 잘리지 않도록 포화될 때까지 키운다.
-        $out = ''
-        foreach ($psize in 200, 1000, 5000) {
-            $out = Invoke-Json (@('envelope', 'list', '-a', $acct) + $foldArgs + @('--page-size', "$psize", '-o', 'json', '--') + $query)
-            $idCount = ([regex]::Matches($out, '"id"')).Count
-            if ($idCount -lt $psize) { break }
-            if ($psize -eq 5000) {
-                Fail 'mailskill: 검색 결과가 5000건을 넘습니다 — 잘린 결과를 내보내지 않고 실패로 처리합니다. 기간·조건을 좁히십시오.' 1
-            }
-        }
-
-        # 서버측 날짜 검색이 0건이면 클라이언트측으로 재확인(네이버웍스 등 SENTSINCE 오답 대응).
-        # 단, 질의가 '날짜 조건만'(and 결합, order-by 꼬리 허용)일 때만. from/subject 혼합·or/not 은 안 함.
-        if ($out -eq '[]') {
-            $toks = @($query)
-            # 정렬 꼬리(order by ...) 제거.
-            for ($i = 0; $i -lt $toks.Count; $i++) {
-                if ($toks[$i] -eq 'order' -and ($i + 1) -lt $toks.Count -and $toks[$i + 1] -eq 'by') {
-                    $toks = Tail $toks 0 | Select-Object -First $i
-                    $toks = @($toks); break
-                }
-            }
-            $pure = $true; $dargs = @(); $prev = ''
-            foreach ($tok in $toks) {
-                if ($tok -notmatch '^(after|before|date|and)$' -and $tok -notmatch '^\d{4}-\d{2}-\d{2}$') { $pure = $false }
-                if ($prev -in @('after', 'before', 'date')) { $dargs += "$prev=$tok" }
-                $prev = $tok
-            }
-            if ($pure -and $dargs.Count -gt 0) {
-                if ($env:MAILSKILL_LOG) { [Console]::Error.WriteLine('mailskill: 서버측 날짜 검색 0건 → 클라이언트측 재확인') }
-                $fb = Invoke-Python (Join-Path $REPO 'scripts\date-search.py') $acct $foldName @dargs
-                if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-                Emit (@($fb) -join "`n"); exit 0
-            }
-        }
-        Emit $out; exit 0
+        $foldName = '-'
+        if ($q.Count -ge 1 -and $q[0] -eq '-f') { $foldName = (Req $q[1] 'folder'); $q = Tail $q 2 }
+        # 맨 키워드면 subject/body DSL 로 감싼다(#25). DSL 이면 그대로.
+        $backendQuery = ConvertTo-SearchQuery $q
+        # 나머지는 search.py 가 한다(#30): 날짜 절(after/before/date)은 서버에 보내지 않고 클라이언트에서
+        # 거른다(웍스 SENTSINCE 0건·2.x 에서 before 삭제 대응), 페이지 크기 200→1000→5000 포화 검사,
+        # envelope search/list 선택, 1.x 봉투 모양 정규화. 예전의 "0건이면 date-search 재확인"은 흡수됐다.
+        $out = Invoke-Python (Join-Path $REPO 'scripts\search.py') $acct $foldName '--' @backendQuery
+        $rc = $LASTEXITCODE
+        if ($rc -ne 0) { if ($rc -ne 2 -and $rc -ne 127) { Show-VersionHint }; exit $rc }
+        Emit (@($out) -join "`n"); exit 0
     }
     'read' {
         $acct = Req $rest[0] 'account'
         $id = Req $rest[1] 'id'
         $folder = if ($rest.Count -ge 3) { $rest[2] } else { $null }
-        $fArgs = if ($folder) { @('-f', $folder) } else { @() }
-        Emit (Invoke-Json (@('message', 'read', $id, '-a', $acct) + $fArgs + @('-o', 'json'))); exit 0
+        $fArgs = ConvertTo-MailboxArgs $folder
+        # hjson read 가 --raw 원문을 1.x 와 같은 JSON 문자열 스칼라("From: ..\n\n본문")로 바꾼다.
+        # 2.x 는 기본으로 \Seen 을 찍지 않는다(1.x 는 찍었다).
+        $out = Invoke-Hjson 'read' (@('message', 'read', $id, '-a', $acct) + $fArgs)
+        # 방어: 빈 JSON 문자열("")이면 "메시지 없음"으로 본다(1.2.0 IMAP 의 없는 id 동작, #29).
+        if (($out -replace '\s', '') -eq '""') {
+            $where = if ($folder) { ", 폴더 '$folder'" } else { '' }
+            Fail "mailskill read: 메시지를 찾을 수 없습니다 — 계정 '$acct', id '$id'$where. id 와 폴더(-f 기본 INBOX)를 확인하십시오." 1
+        }
+        Emit $out; exit 0
     }
     'reply' {
+        # himalaya 2.x 의 message reply 는 비대화형·플래그 기반으로 바뀌었다(#30). 미리보기 게이트를
+        # 유지하려고 send --reply-to <id> 로 넘긴다(bash 판과 같음). 나머지 옵션은 그대로 전달.
         $acct = Req $rest[0] 'account'; $id = Req $rest[1] 'id'
-        & $H message reply $id -a $acct
+        $fwd = @('send', $acct, '--reply-to', $id) + (Tail $rest 2)
+        & $PSCommandPath @fwd
         exit $LASTEXITCODE
     }
     'send' {
@@ -293,8 +337,8 @@ switch ($cmd) {
         }
 
         try {
-            $config = if ($env:HIMALAYA_CONFIG) { $env:HIMALAYA_CONFIG } else { Join-Path $HOME '.config\himalaya\config.toml' }
-            if (-not (Test-Path $config)) { $config = Join-Path $REPO 'config\config.toml' }
+            # compose-mime(From 해석)·dup-guard 가 읽을 config. himalaya 2.x 기본 탐색 순서를 따른다.
+            $config = Resolve-HimalayaConfig
 
             $composePy = Join-Path $REPO 'scripts\compose-mime.py'
             $dupGuardPy = Join-Path $REPO 'scripts\dup-guard.py'
@@ -319,12 +363,16 @@ switch ($cmd) {
             $metaSubj = $meta.subject
             $inReplyTo = $meta.in_reply_to
             $references = $meta.references
+            # 첨부 한도 가드(#24). 문구는 compose-mime.py 가 만든다(bash 어댑터와 공유).
+            $attachOver = [bool]$meta.attach_over_limit
+            $attachSummary = $meta.attach_summary
+            $attachGuardMsg = $meta.attach_guard_message
 
             # 2. 미리보기
             if (-not $dosend) {
                 $dupWarn = 0
                 if (-not $force) {
-                    $null = Invoke-Python $dupGuardPy --account $acct --to $metaTo --subject $metaSubj --window $dupwindow --config $config --himalaya-bin $H 2>$null
+                    $null = Invoke-PythonQuiet $dupGuardPy --account $acct --to $metaTo --subject $metaSubj --window $dupwindow --config $config --himalaya-bin $H
                     $dupWarn = $LASTEXITCODE
                 }
                 Emit '── mailskill send 미리보기 (실전송하려면 동일 명령에 --send 추가) ──'
@@ -335,7 +383,10 @@ switch ($cmd) {
                 Emit "제목      : $metaSubj"
                 if ($inReplyTo) { Emit "In-Reply-To: $inReplyTo" }
                 if ($references) { Emit "References : $references" }
-                if ($attach.Count -gt 0) { Emit "첨부      : $($attach -join ' ')" }
+                if ($attach.Count -gt 0) {
+                    Emit "첨부      : $($attach -join ' ')"
+                    Emit "첨부 합계 : $attachSummary"
+                }
                 Emit '본문:'
                 if ($null -ne $body) {
                     foreach ($l in $body.Split("`n")) { Emit "  $l" }
@@ -352,41 +403,44 @@ switch ($cmd) {
                     Emit ''
                     Emit "⚠️  주의: 최근 ${dupwindow}분 내 동일 수신자+제목 발송 이력이 있습니다. 실전송 시 --force 옵션이 필요합니다."
                 }
+                if ($attachOver) {
+                    Emit ''
+                    foreach ($l in ("⛔ $attachGuardMsg").Split("`n")) { Emit $l }
+                    Emit '   (이 상태로는 --send 해도 발송되지 않습니다.)'
+                }
                 exit 0
             }
 
             # 3. 실전송
+            # 첨부 한도 가드(#24): 중복 가드·MIME 조립보다 먼저 막는다. --force 로도 넘을 수 없다.
+            if ($attachOver) {
+                Fail "mailskill send: $attachGuardMsg" 4
+            }
             # 중복 발송 가드: --force 가 아닐 때 보낸편지함 검사
             if (-not $force) {
                 Invoke-Python $dupGuardPy --account $acct --to $metaTo --subject $metaSubj --window $dupwindow --config $config --himalaya-bin $H
                 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             }
 
-            # himalaya message send 실행 및 APPEND-UID 오류('발송 성공'으로 분류) 처리
-            # compose-mime.py 의 -o 옵션으로 UTF-8 바이너리 파일을 직접 생성하여 파이프 인코딩 왜곡 방지
+            # 발송은 hjson.py send 가 한다(#30): python 이 `message send -a A -- <파일>` 을 직접 실행하므로
+            # cmd /c "... < 파일" 리다이렉트가 필요 없다. "Message sent, but saving a copy ... failed"
+            # (SMTP 발송 성공 + 보낸함 저장 실패)는 hjson 이 재시도 금지 안내와 함께 exit 0 으로 낸다 —
+            # 1.x 의 APPEND-UID 분기를 대체(중복 발송 방지). 분류 한 단어(sent|sent-save-failed|failed)는 stdout.
+            # compose-mime.py 의 -o 로 MIME 을 바이너리 파일에 직접 써서 파이프 인코딩 왜곡을 피한다.
             $tmpMime = [System.IO.Path]::GetTempFileName()
-            $errFile = [System.IO.Path]::GetTempFileName()
             try {
                 Invoke-Python @cargs @('-o', $tmpMime)
                 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-                cmd /c "`"$H`" message send -a `"$acct`" < `"$tmpMime`" 2>`"$errFile`""
+                $res = Invoke-Python (Join-Path $REPO 'scripts\hjson.py') send --account $acct --file $tmpMime
                 $rc = $LASTEXITCODE
-                $errText = Get-Content -Raw -LiteralPath $errFile -ErrorAction SilentlyContinue
-                if ($rc -ne 0) {
-                    if ($errText -match 'cannot find UID of appended IMAP message') {
-                        [Console]::Error.WriteLine('mailskill send: 발송 완료, 보낸함 저장 확인 실패 — 재시도 금지 (cannot find UID of appended IMAP message)')
-                        [Console]::Error.WriteLine('메일은 SMTP로 정상 발송되었습니다. 수신자에게 이미 전달되었으므로 절대 재시도하지 마십시오.')
-                        exit 0
-                    }
-                    if ($errText) { [Console]::Error.Write($errText) }
-                    Fail "mailskill send: 발송 실패 (exit $rc)" $rc
-                }
-                [Console]::Error.WriteLine('mailskill send: 발송 완료')
+                $kind = (@($res) -join "`n").Trim()
+                if ($rc -ne 0) { if ($rc -ne 127) { Show-VersionHint }; Fail "mailskill send: 발송 실패 (exit $rc)" $rc }
+                if ($kind -eq 'sent-save-failed') { [Console]::Error.WriteLine('mailskill send: 발송 완료(보낸함 사본 저장만 실패) - 재시도 금지') }
+                else { [Console]::Error.WriteLine('mailskill send: 발송 완료') }
                 exit 0
             }
             finally {
                 Remove-Item -LiteralPath $tmpMime -ErrorAction SilentlyContinue
-                Remove-Item -LiteralPath $errFile -ErrorAction SilentlyContinue
             }
         }
         finally {
@@ -402,7 +456,7 @@ switch ($cmd) {
         $i = 0
         while ($i -lt $q.Count) {
             if ($q[$i] -eq '-f') {
-                $foldArgs = @('-f', (Req $q[$i + 1] 'folder'))
+                $foldArgs = ConvertTo-MailboxArgs (Req $q[$i + 1] 'folder')
                 $i += 2
             } else {
                 $outDir = $q[$i]
@@ -415,20 +469,11 @@ switch ($cmd) {
         $tmpEml = [System.IO.Path]::Combine($tmpDir, 'raw.eml')
 
         try {
-            $exportArgs = @('message', 'export', $id, '-a', $acct) + $foldArgs + @('--full', '-d', $tmpEml)
-            # PS 5.1: 네이티브 stderr 를 2>&1 로 합친 뒤 ErrorRecord 는 .Exception.Message(원문)로
-            # 분리한다 — 2>파일 로 받으면 ErrorRecord 렌더 노이즈가 붙는다(Windows PS 5.1 실측). 파일
-            # EAP=Stop 에서 stderr 가 흘러오면 $LASTEXITCODE 전에 throw 하므로 여기서만 Continue.
-            $ErrorActionPreference = 'Continue'
-            $merged = & $H @exportArgs 2>&1
+            # 2.x 에는 message export 가 없다 → message read --raw 원문을 파일로. hjson raw 가 바이트 그대로
+            # 쓰므로 PS 5.1 파이프(문자열 변환)나 cmd /c "... > 파일" 이 필요 없다(#30).
+            $null = Invoke-Python (Join-Path $REPO 'scripts\hjson.py') raw '--out' $tmpEml '--' message read $id -a $acct @foldArgs
             $rc = $LASTEXITCODE
-            $errText = (@($merged |
-                Where-Object { $_ -is [System.Management.Automation.ErrorRecord] } |
-                ForEach-Object { [string]$_.Exception.Message }) -join "`n")
-            if ($rc -ne 0) {
-                if ($errText) { [Console]::Error.WriteLine($errText) }
-                Fail "mailskill attachment: raw eml 내보내기 실패 (exit $rc)" $rc
-            }
+            if ($rc -ne 0) { if ($rc -ne 127) { Show-VersionHint }; Fail "mailskill attachment: raw eml 내보내기 실패 (exit $rc)" $rc }
 
             $env:PYTHONIOENCODING = 'utf-8'
             $exportPy = Join-Path $REPO 'scripts\attachment-export.py'
@@ -441,9 +486,21 @@ switch ($cmd) {
         }
     }
     'doctor' {
+        # 2.x: account doctor → account check. check 는 백엔드가 FAIL 이어도 exit 0 이라, 판정은
+        # hjson.py check 가 한다(stdout 첫 줄 ok|auth|secret|config|network + 백엔드별 보고, 실패면 exit 3 +
+        # stderr 에 "문장 / -> 고치는 법" 두 줄). bash 판과 같이 doctor 는 실패면 exit 1.
+        # 버전 가드를 먼저 — 1.x 가 깔려 있으면 check 가 CLI 파싱에서 깨져 엉뚱한 원인으로 보이기 때문.
         $acct = Req $rest[0] 'account'
-        & $H account doctor $acct
-        exit $LASTEXITCODE
+        $hjson = Join-Path $REPO 'scripts\hjson.py'
+        $null = Invoke-Python $hjson version
+        if ($LASTEXITCODE -ne 0) { exit 1 }   # bash 판과 같이 doctor 실패는 모두 exit 1
+        Write-ConfigShadowWarning
+        $res = Invoke-Python $hjson check --account $acct
+        $rc = $LASTEXITCODE
+        foreach ($l in @($res)) { Emit ([string]$l) }
+        $verdict = (@($res) | Select-Object -First 1)
+        if ($rc -ne 0 -or $verdict -ne 'ok') { exit 1 }
+        exit 0
     }
     default {
         [Console]::Error.WriteLine("mailskill: 알 수 없는 동사 '$cmd'")

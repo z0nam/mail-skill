@@ -27,11 +27,13 @@ import json
 import os
 import re
 import signal
-import subprocess
 import sys
 import time
 import unicodedata
 from datetime import datetime
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import hjson  # noqa: E402
 
 PAGE_STEPS = (50, 200, 1000, 5000)
 
@@ -148,30 +150,14 @@ def format_sender(env):
 
 
 def fetch_page(acct, folder, size):
-    hbin = os.environ.get("HIMALAYA_BIN", "himalaya")
-    env = os.environ.copy()
-    env.setdefault("RUST_LOG", os.environ.get("MAILSKILL_LOG", "off"))
-    cmd = [hbin, "envelope", "list", "-a", acct]
-    if folder:
-        cmd += ["-f", folder]
-    cmd += ["--page-size", str(size), "-o", "json"]
+    """최신순 봉투 한 페이지(1.x 계약 모양). 2.x 는 0건·범위 밖 페이지가 빈 배열 + exit 0 이다."""
+    args = ["envelope", "list", "-a", acct] + (["-m", folder] if folder else []) + ["-s", str(size)]
     try:
-        p = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", env=env)
-    except FileNotFoundError:
-        raise RuntimeError(f"백엔드 '{hbin}' 를 PATH 에서 찾을 수 없습니다")
-    if p.returncode != 0:
-        err = (p.stderr or "").strip()
-        if "out of bounds" in err:
-            return []
-        raise RuntimeError(f"봉투 조회 실패 (exit {p.returncode}): {err or 'stderr 없음'}")
-    out = (p.stdout or "").strip()
-    if not out:
-        return []
-    try:
-        data = json.loads(out)
-    except json.JSONDecodeError as e:
-        raise RuntimeError(f"백엔드 JSON 파싱 실패: {e}")
-    return data if isinstance(data, list) else []
+        return hjson.envelopes(hjson.run_json(args))
+    except hjson.BackendError as e:
+        if e.rc == 127:
+            raise RuntimeError(f"백엔드 '{hjson.himalaya_bin()}' 를 PATH 에서 찾을 수 없습니다")
+        raise RuntimeError(f"봉투 조회 실패 (exit {e.rc}): {e.msg}")
 
 
 def fetch_candidates(acct, folder, after_id, since_floor):

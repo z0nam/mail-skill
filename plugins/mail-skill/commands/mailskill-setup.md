@@ -36,7 +36,7 @@ sort -u -o ~/.config/mail-skill/recipients.txt ~/.config/mail-skill/recipients.t
 mkdir -p ~/.config/himalaya
 [ -f ~/.config/himalaya/config.toml ] || cp "${CLAUDE_PLUGIN_ROOT}/config/config.sample.toml" ~/.config/himalaya/config.toml
 ```
-사용자에게: `~/.config/himalaya/config.toml` 에 계정 블록을 추가하고, `auth.cmd = "mail-secret himalaya-<name>"` 형식으로 둘 것. 제공사별 호스트는 샘플 주석 참고.
+사용자에게: `~/.config/himalaya/config.toml` 에 계정 블록을 추가하고, `imap.sasl.plain.password.command = "mail-secret himalaya-<name>"`(smtp 도 같게) 형식으로 둘 것(himalaya 2.x 형식, 1.x 의 `backend.*` 는 읽지 않음). 제공사별 호스트는 샘플 주석 참고.
 
 ## 5) 계정 비밀번호(앱비번) 등록
 계정마다 (대개 앱 전용 비밀번호):

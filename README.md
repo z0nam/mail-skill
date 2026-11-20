@@ -29,7 +29,7 @@
 
 ## 설치 (macOS 예)
 ```sh
-brew install himalaya age          # 엔진 + 암호화
+brew install himalaya age          # 엔진(2.2.x 전용, #30) + 암호화
 git clone <this-repo> ~/dev/mail-skill
 ~/dev/mail-skill/scripts/bootstrap.sh    # age 키 생성 + 심링크(config/스킬/mail-secret)
 cp config/config.sample.toml ~/.config/himalaya/config.toml   # 계정 채우기
@@ -53,7 +53,7 @@ secret-set himalaya-<name>                           # 계정별 앱비번 등�
 - **PATH 의 `cli\` 이 핵심**이다. Himalaya 의 `auth.cmd = "mail-secret <name>"` 가 `mail-secret.cmd` 를 PATH 에서 찾아 비번을 얻는다 — 넣지 않으면 라이브 IMAP 인증이 실패한다.
 - **심링크엔 개발자 모드(또는 관리자)** 가 필요하다. bootstrap.ps1 은 실패 시 복사로 폴백하지만, 복사하면 SSOT가 깨져(레포 수정이 반영 안 됨) 개발자 모드를 켜 심링크로 두길 권한다.
 - **Python(선택)**: 날짜검색 클라이언트측 폴백(`date-search.py`)과 메일 수신 대기(`mail-watch.py`)에 쓴다. 없으면 대부분 동작하되, 일부 서버(네이버웍스 등)의 날짜검색 폴백과 `mailskill watch`가 안 된다.
-- **caveat**: Himalaya 가 Windows 에서 `auth.cmd` 를 `cmd` 로 실행한다는 전제다(그럼 `.cmd` shim 이 걸린다). 만약 `sh` 로 실행하는 빌드라면 그 경우엔 Git Bash 의 bash `mail-secret` 이 대신 쓰인다. 실기계 최초 셋업 때 `mailskill doctor <acct>` 로 한 번 확인할 것.
+- **caveat**: Himalaya 2.x 는 Windows 에서 `password.command` 를 `cmd /C` 로 실행한다(소스 확인, #30)(그럼 `.cmd` shim 이 걸린다). 만약 `sh` 로 실행하는 빌드라면 그 경우엔 Git Bash 의 bash `mail-secret` 이 대신 쓰인다. 실기계 최초 셋업 때 `mailskill doctor <acct>` 로 한 번 확인할 것.
 
 ## 어댑터 계약
 ```sh
@@ -61,7 +61,7 @@ mailskill accounts                     # 계정 목록(JSON)
 mailskill list   <acct> [n]            # 최근 n통
 mailskill search <acct> <query...>     # IMAP 쿼리 검색
 mailskill read   <acct> <id> [folder]  # 메시지 읽기
-mailskill reply  <acct> <id>           # 회신 초안 (대화형 $EDITOR)
+mailskill reply  <acct> <id> [send 옵션] # = send --reply-to <id> (기본 미리보기)
 mailskill send   <acct> [옵션...]      # 메일 발송/비대화형 답장 (미리보기 기본, --send 로 실전송)
 mailskill attachment <acct> <id> [dir] # 첨부파일 다운로드 (무결성 검증, 이슈 #9)
 mailskill watch  <acct> [옵션...]      # 새 메일/회신 폴링 대기 (도착 exit 0, 만료 exit 2)

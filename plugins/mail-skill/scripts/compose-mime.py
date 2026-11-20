@@ -26,7 +26,12 @@ from email.header import Header
 from email.mime.base import MIMEBase
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from email import policy
+from email.parser import BytesParser
 from pathlib import Path
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import hjson  # noqa: E402
 
 
 def rfc2047_param(name):
@@ -79,26 +84,8 @@ def encode_text_header(value):
 
 
 def himalaya_config_args(config_path):
-    """himalaya 에 넘길 `-c` 인자. 기본 탐색으로 같은 파일을 찾으면 `-c` 를 아예 주지 않는다.
-
-    himalaya 1.2.0 Windows 는 config 를 **절대경로로** 받으면(-c 든 HIMALAYA_CONFIG 든)
-    auth.cmd 단계에서 멈춘다(실측). 기본 탐색(~/.config/himalaya/config.toml)은 정상이고,
-    셋업은 늘 그 위치에 쓰므로 그 경우엔 `-c` 를 빼서 어댑터의 다른 동사와 같은 경로를 탄다.
-    기본 위치가 아닌 config(저장소 폴백 등)만 예전처럼 `-c` 로 명시한다.
-    """
-    if not config_path or not Path(config_path).is_file():
-        return []
-    target = Path(config_path).resolve()
-    defaults = [Path.home() / ".config" / "himalaya" / "config.toml"]
-    if os.environ.get("HIMALAYA_CONFIG"):
-        defaults.append(Path(os.environ["HIMALAYA_CONFIG"]))  # himalaya 가 env 로 스스로 읽는다
-    for d in defaults:
-        try:
-            if d.is_file() and d.resolve() == target:
-                return []
-        except OSError:
-            pass
-    return ["-c", config_path]
+    """himalaya 에 넘길 `-c` 인자 — 규칙은 hjson.config_args 한 곳에 있다(':' 분할·가림·상대경로)."""
+    return hjson.config_args(config_path)
 
 
 def resolve_from(account, config_path):
@@ -124,9 +111,10 @@ def resolve_from(account, config_path):
 def check_himalaya_bcc_safe(himalaya_bin=None):
     """Himalaya < 2.2.1 환경에서 Bcc 헤더가 SMTP DATA 로 누출되는 취약점(#747) 방지.
     안전한 버전(>= 2.2.1)임이 명확히 확인되지 않으면 fail-closed 로 거부한다."""
-    h_bin = himalaya_bin or os.environ.get("HIMALAYA_BIN", "himalaya")
+    h_bin = hjson.himalaya_bin(himalaya_bin)  # Windows: PATHEXT 로 .exe/.cmd 도 찾는다
     try:
-        res = subprocess.run([h_bin, "--version"], capture_output=True, text=True, encoding="utf-8", errors="replace", check=False)
+        res = subprocess.run([h_bin, "--version"], capture_output=True, text=True, encoding="utf-8", errors="replace",
+                             stdin=subprocess.DEVNULL, check=False)
         if res.returncode == 0:
             m = re.search(r'(?:himalaya\s+)?v?(\d+)\.(\d+)(?:\.(\d+))?', res.stdout)
             if m:
@@ -150,41 +138,136 @@ def check_himalaya_bcc_safe(himalaya_bin=None):
     )
 
 
-def fetch_reply_headers(account, message_id, folder=None, config_path=None, himalaya_bin=None):
-    """himalaya message read 로 원본 메일의 주요 헤더(Message-ID, Subject, From, Reply-To, References 등)를 조회한다."""
-    h_bin = himalaya_bin or os.environ.get("HIMALAYA_BIN", "himalaya")
-    cmd = [
-        h_bin, "message", "read", str(message_id),
-        "-a", account, "-p",
-        "-H", "Reply-To", "-H", "From", "-H", "To", "-H", "Subject",
-        "-H", "Message-ID", "-H", "References", "-H", "In-Reply-To"
-    ]
-    if folder:
-        cmd.extend(["-f", folder])
-    cmd.extend(himalaya_config_args(config_path))
+# ── 첨부 용량 가드 (#24) ─────────────────────────────────────────────
+# SMTP 로 수십 MB 를 직접 첨부하면 서버가 한도를 넘는 메시지를 받다 끊거나 전송이 수 분 이상
+# 걸린 끝에 타임아웃으로 실패한다(113MB → 약 10분 뒤 실패, 미발송). himalaya 1.2.0 SMTP 설정에는
+# 타임아웃 키가 없으므로 보내기 전에 막는다. 기준은 첨부 파일 원본 크기 합계(base64 로 약 1.37배가 된다).
+DEFAULT_ATTACH_LIMIT_MB = 20
+ATTACH_LIMIT_ENV = "MAILSKILL_ATTACH_LIMIT_MB"
+ATTACH_GUARD_EXIT = 4
+MB = 1024 * 1024
 
+
+def settings_path():
+    """mail-skill 자체 설정 파일. himalaya config 와 분리한다(백엔드 교체와 무관하게 유지)."""
+    env = os.environ.get("MAIL_SKILL_SETTINGS")
+    if env:
+        return Path(env)
+    return Path.home() / ".config" / "mail-skill" / "settings.toml"
+
+
+def _parse_limit(raw, where):
     try:
-        res = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", check=False)
-    except FileNotFoundError:
-        sys.exit(f"compose-mime: himalaya 실행 파일('{h_bin}')을 찾을 수 없음")
+        v = float(str(raw).strip().strip('"').strip("'"))
+    except ValueError:
+        sys.exit(f"compose-mime: 첨부 한도 값이 숫자가 아닙니다({where}): {raw!r}")
+    return v
 
-    if res.returncode != 0:
-        err = res.stderr.strip() or f"exit code {res.returncode}"
-        sys.exit(f"compose-mime: 원 메일({message_id}) 조회 실패: {err}")
 
-    headers = {}
-    last_key = None
-    for line in res.stdout.splitlines():
-        if line == "":
-            break  # 헤더 끝
-        if line.startswith((" ", "\t")) and last_key:
-            headers[last_key] += " " + line.strip()
+def read_limit_table(path):
+    """settings.toml 의 [attach-limit-mb] 표를 {키: 값} 으로 읽는다.
+
+    tomllib 이 없는 파이썬(3.10 이하 폴백)도 있으므로 이 표 하나만 단순 스캔한다:
+        [attach-limit-mb]
+        default = 20
+        ji = 25
+    """
+    table = {}
+    if not path.is_file():
+        return table
+    in_sec = False
+    for line in path.read_text(encoding="utf-8-sig").splitlines():
+        s = line.split("#", 1)[0].strip()
+        if not s:
             continue
-        m = re.match(r'^([\w\-]+):\s*(.*)$', line)
-        if m:
-            last_key = m.group(1)
-            headers[last_key] = m.group(2).strip()
+        if s.startswith("[") and s.endswith("]"):
+            in_sec = (s == "[attach-limit-mb]")
+            continue
+        if in_sec:
+            m = re.match(r'^"?([^"=\s]+)"?\s*=\s*(.+)$', s)
+            if m:
+                table[m.group(1)] = m.group(2)
+    return table
 
+
+def attach_limit_mb(account):
+    """계정의 첨부 한도(MB). 우선순위: 환경변수 > settings.toml 계정 키 > default 키 > 20.
+    0 이하이면 가드를 끈다."""
+    env = os.environ.get(ATTACH_LIMIT_ENV)
+    if env not in (None, ""):
+        return _parse_limit(env, ATTACH_LIMIT_ENV), ATTACH_LIMIT_ENV
+    path = settings_path()
+    table = read_limit_table(path)
+    if account and account in table:
+        return _parse_limit(table[account], f"{path} [attach-limit-mb] {account}"), f"{path} ({account})"
+    if "default" in table:
+        return _parse_limit(table["default"], f"{path} [attach-limit-mb] default"), f"{path} (default)"
+    return float(DEFAULT_ATTACH_LIMIT_MB), "기본값"
+
+
+def _fmt_mb(n_bytes):
+    return f"{n_bytes / MB:.1f}MB"
+
+
+def _fmt_limit(mb):
+    return f"{mb:g}MB"
+
+
+def attach_guard(account, attach_paths):
+    """첨부 합계와 한도를 비교한 결과 dict. 첨부 경로는 이미 존재 확인된 것이어야 한다."""
+    total = sum(Path(p).stat().st_size for p in attach_paths)
+    limit_mb, source = attach_limit_mb(account)
+    enabled = limit_mb > 0
+    limit_bytes = int(limit_mb * MB) if enabled else 0
+    over = enabled and bool(attach_paths) and total > limit_bytes
+    who = f"계정 '{account}'" if account else "이 발송"
+    msg = ""
+    if over:
+        msg = "\n".join([
+            f"첨부 합계 {_fmt_mb(total)} 가 {who}의 첨부 한도 {_fmt_limit(limit_mb)} 를 넘어 발송하지 않습니다.",
+            "원인: 메일 서버(SMTP)로 큰 파일을 직접 첨부하면 전송이 수 분 이상 걸린 끝에 타임아웃으로 실패하거나 서버가 거부합니다.",
+            "대안: ① 웍스 웹메일의 '대용량 첨부'로 보내기 ② 파일을 드라이브(웍스 드라이브 등)에 올리고 공유 링크를 본문에 넣어 보내기",
+            f"한도 조정: 환경변수 {ATTACH_LIMIT_ENV}=<MB> 또는 {settings_path()} 의 [attach-limit-mb] 표에 '<계정> = <MB>' (현재 기준: {source})",
+        ])
+    return {
+        "attach_total_bytes": total,
+        "attach_limit_bytes": limit_bytes,
+        "attach_limit_mb": limit_mb if enabled else 0,
+        "attach_over_limit": over,
+        "attach_summary": (f"{_fmt_mb(total)} / 한도 {_fmt_limit(limit_mb)}" if enabled else f"{_fmt_mb(total)} / 한도 없음") if attach_paths else "",
+        "attach_guard_message": msg,
+    }
+
+
+REPLY_HEADERS = ("Reply-To", "From", "To", "Subject", "Message-ID", "References", "In-Reply-To")
+
+
+def fetch_reply_headers(account, message_id, folder=None, config_path=None, himalaya_bin=None):
+    """원본 메일의 주요 헤더(Message-ID, Subject, From, Reply-To, References 등)를 조회한다.
+
+    2.x 는 `message read -p -H ...` 가 없어졌다. `--raw` 원문을 받아 email 모듈로 헤더를 읽는다
+    (인코디드워드는 디코드, 접힌 줄은 펼친 값). `--raw` 는 읽음 표시를 바꾸지 않는다.
+    """
+    args = ["message", "read", str(message_id), "-a", account]
+    if folder:
+        args += ["-m", folder]
+    args += himalaya_config_args(config_path)
+    try:
+        raw = hjson.run(args, json_out=False, raw=True, hbin=himalaya_bin)
+    except hjson.ConfigPathError as e:
+        sys.exit(f"compose-mime: {e}")
+    except hjson.BackendError as e:
+        if e.rc == 127:
+            sys.exit(f"compose-mime: himalaya 실행 파일('{himalaya_bin or os.environ.get('HIMALAYA_BIN', 'himalaya')}')을 찾을 수 없음")
+        sys.exit(f"compose-mime: 원 메일({message_id}) 조회 실패: {e.msg}")
+    if not raw.strip():
+        sys.exit(f"compose-mime: 원 메일({message_id}) 조회 실패: 빈 원문")
+    msg = BytesParser(policy=policy.default).parsebytes(raw, headersonly=True)
+    headers = {}
+    for h in REPLY_HEADERS:
+        v = msg.get(h)
+        if v is not None:
+            headers[h] = " ".join(str(v).split())
     return headers
 
 
@@ -290,7 +373,10 @@ def main():
         if not path.is_file():
             sys.exit(f"compose-mime: 첨부 파일 없음: {item}")
 
+    guard = attach_guard(a.from_account, a.attach)
+
     # 메타데이터 덤프 모드 (대용량 본문으로 인한 파이프/argv 오버헤드 방지를 위해 body 제외)
+    # 첨부 한도 초과도 여기서는 실패로 내지 않는다 — 어댑터가 미리보기에서 경고하고 --send 를 막는다.
     if a.dump_meta:
         meta = {
             "from": from_addr,
@@ -302,6 +388,7 @@ def main():
             "references": references or "",
             "attach": a.attach,
         }
+        meta.update(guard)
         print(json.dumps(meta, ensure_ascii=False))
         return
 
@@ -321,10 +408,19 @@ def main():
             print(f"References : {references}")
         if a.attach:
             print(f"첨부       : {' '.join(a.attach)}")
+            print(f"첨부 합계  : {guard['attach_summary']}")
         print("본문:")
         for line in body.splitlines()[:60]:
             print(f"  {line}")
+        if guard["attach_over_limit"]:
+            print()
+            print("⛔ " + guard["attach_guard_message"])
         return
+
+    # MIME 조립 단계의 이중 안전장치: 한도를 넘으면 메시지를 만들지 않는다(어댑터가 놓쳐도 발송 불가).
+    if guard["attach_over_limit"]:
+        print("compose-mime: " + guard["attach_guard_message"], file=sys.stderr)
+        sys.exit(ATTACH_GUARD_EXIT)
 
     # MIME 객체 생성.
     #

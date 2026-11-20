@@ -3,7 +3,9 @@
 #   1) age 키 보장(없으면 생성) + recipients.txt 에 이 기계 공개키
 #   2) 앱 비밀번호를 숨김 입력 → secret-set 으로 himalaya-<acct>-imap / -smtp 두 이름에 저장
 #   3) 템플릿(config/works.template.toml)으로 이 PC 전용 himalaya config 생성
-#   4) himalaya account doctor 로 auth.cmd → age 복호 → IMAP/SMTP 로그인 확인
+#   4) himalaya account check 로 password.command → age 복호 → IMAP/SMTP 로그인 확인
+#
+# himalaya 2.x 전용(#30). 1.x 형식으로 된 기존 설정 파일은 백업(.bak-v1-*)하고 새로 만든다.
 #
 #   mailskill setup [--email <주소>] [--login <아이디>] [--display-name <이름>]
 #                   [--account <이름>] [--password-stdin] [--no-verify]
@@ -15,12 +17,23 @@ set -euo pipefail
 _self="$0"; while [ -L "$_self" ]; do _t="$(readlink "$_self")"; case "$_t" in /*) _self="$_t";; *) _self="$(dirname "$_self")/$_t";; esac; done
 REPO="${MAIL_SKILL_REPO:-$(cd "$(dirname "$_self")/.." && pwd)}"
 H="${HIMALAYA_BIN:-himalaya}"
+export HIMALAYA_BIN="$H" PYTHONUTF8=1 PYTHONIOENCODING=utf-8 NO_COLOR=1 RUST_LOG=off
 
 say()  { printf '%s\n' "$*" >&2; }
 fail() { say "✗ $1"; [ -n "${2:-}" ] && say "  → $2"; exit "${3:-1}"; }
 
 # 사용법은 이 파일 머리 주석에서 뽑는다 — 두 군데에 적어두면 갈라진다.
 usage() { sed -n '2,/^set -euo/p' "$_self" | sed '$d' | sed 's/^# \{0,1\}//'; }
+
+# 공통 판정·문구는 scripts/hjson.py 한 곳에 있다(mailskill 어댑터·mail-setup.ps1 과 공유).
+# 실행기는 어댑터(cli/mailskill)의 run_python 과 같은 순서: uv 의 3.12 → python3 → python.
+py() {
+  if command -v uv >/dev/null 2>&1 && uv python find 3.12 >/dev/null 2>&1; then
+    uv run --no-project -q --no-python-downloads --python 3.12 "$@"
+  elif command -v python3 >/dev/null 2>&1; then python3 "$@"
+  elif command -v python  >/dev/null 2>&1; then python "$@"
+  else say "✗ python 을 찾을 수 없습니다"; return 127; fi
+}
 
 acct="ji"; email=""; login=""; dname=""; pwstdin=0; verify=1
 while [ $# -gt 0 ]; do
@@ -41,6 +54,10 @@ done
 missing=()
 for t in "$H" age age-keygen; do command -v "$t" >/dev/null 2>&1 || missing+=("$t"); done
 [ ${#missing[@]} -eq 0 ] || fail "필요한 프로그램이 없습니다: ${missing[*]}" "jaix setup 이 설치합니다. jaix setup 을 먼저 실행한 뒤 다시 하세요."
+# 버전 가드: 2.x 가 아니면(1.x 등) 설정 형식부터 맞지 않는다. 비밀번호를 받기 전에 멈춘다.
+# 안내 문구는 hjson.py version 이 stderr 로 낸다.
+py "$REPO/scripts/hjson.py" version >/dev/null \
+  || fail "지원하지 않는 himalaya 버전입니다(위 안내 참조, 지원 버전 2.2.x)." "jaix setup 으로 himalaya 를 다시 설치한 뒤 다시 하세요."
 
 # 비밀번호는 사람이 직접 터미널에서 넣는다. 에이전트 도구처럼 터미널이 없는 곳에서는
 # 숨김 입력이 불가능하므로 시작 전에 멈춘다(--password-stdin 은 자동화·테스트용).
@@ -130,6 +147,22 @@ render() {
   printf '%s\n' "$t" | sed -n '/^\[accounts\./,$p'
 }
 mkdir -p "$(dirname "$CONF")"
+# 1.x 형식 판별: 1.x 의 backend / message.send.backend 는 2.x 가 읽지 않는다(계정이 "백엔드 없음"이 됨).
+# TOML 의 세 가지 쓰는 법을 다 본다 — 점 키(backend.type = …), 표 머리([accounts.X.backend]·
+# [accounts.X.message.send.backend]), 인라인 표(backend = { … }). 2.x 설정에는 backend 라는 키가 없다.
+is_v1() {
+  grep -qE '^[[:space:]]*((message\.)?send\.)?backend\.(type|host|port|login|auth|encryption)|^[[:space:]]*\[accounts\.[^]]*\.backend(\.[^]]*)?\]|^[[:space:]]*((message\.)?send\.)?backend[[:space:]]*=[[:space:]]*\{' "$1" 2>/dev/null
+}
+if [ -L "$CONF" ] && is_v1 "$CONF"; then
+  fail "$CONF 가 다른 파일을 가리키는 링크인데, 그 파일이 himalaya 1.x 형식이라 2.x 가 읽지 못합니다." \
+       "링크 대상 파일을 2.x 형식으로 옮기거나(config/works.template.toml 참고) 링크를 지운 뒤 다시 실행하세요."
+fi
+if [ -f "$CONF" ] && [ ! -L "$CONF" ] && is_v1 "$CONF"; then
+  bak="$CONF.bak-v1-$(date +%Y%m%d%H%M%S)"; mv "$CONF" "$bak"
+  say "! 기존 설정이 himalaya 1.x 형식이라 옮겨 두고 새로 만듭니다: $bak"
+  others="$(grep -oE '^\[accounts\.[^].]+\]' "$bak" | grep -vxF "[accounts.$acct]" | tr '\n' ' ' || true)"
+  [ -z "$others" ] || say "  그 파일의 다른 계정($others)은 옮기지 않았습니다 — 필요하면 2.x 형식으로 직접 옮기세요."
+fi
 if [ -L "$CONF" ]; then
   # 심링크는 대개 저장소의 공용 설정을 가리킨다 — 남의 파일을 고치지 않는다.
   if grep -q "^\[accounts\.$acct\]" "$CONF" 2>/dev/null; then say "✓ 기존 설정을 그대로 씁니다: $CONF"
@@ -144,25 +177,28 @@ else
   say "✓ 기존 설정 끝에 '$acct' 계정을 덧붙였습니다(백업 .bak-*): $CONF"
 fi
 
-# ── 5) 확인: auth.cmd → age 복호 → IMAP/SMTP 로그인 ─────────────────────────
+# 2.x 는 기본 설정을 OS 설정 폴더(맥 ~/Library/Application Support, Windows %APPDATA%)에서 **먼저** 찾고
+# 그다음 ~/.config 를 본다. 앞쪽에 파일이 있으면 방금 만든 설정은 읽히지 않는다 → 알려 준다.
+if [ -z "${HIMALAYA_CONFIG:-}" ]; then
+  for f in ${APPDATA:+"$APPDATA/himalaya/config.toml"} "$HOME/Library/Application Support/himalaya/config.toml"; do
+    if [ -e "$f" ] && [ "$f" != "$CONF" ]; then
+      say "! $f 가 있어 himalaya 는 방금 만든 $CONF 대신 그 파일을 먼저 읽습니다."
+      say "  → 그 파일을 지우거나 옮기세요(쓰는 계정이 있으면 $CONF 로 옮긴 뒤)."
+    fi
+  done
+fi
+
+# ── 5) 확인: password.command → age 복호 → IMAP/SMTP 로그인 ────────────────
 [ "$verify" = 1 ] || { say "· 로그인 확인은 건너뛰었습니다(--no-verify). 나중에: mailskill doctor $acct"; exit 0; }
 command -v mail-secret >/dev/null 2>&1 \
   || fail "mail-secret 명령을 찾을 수 없어 메일 프로그램이 비밀번호를 못 읽습니다." "jaix setup 을 다시 실행해 PATH 를 잡은 뒤 'mailskill doctor $acct' 로 확인하세요." 3
-out="$(NO_COLOR=1 RUST_LOG=off "$H" account doctor "$acct" 2>&1)" && rc=0 || rc=$?
+# 2.x 의 account check 는 백엔드가 FAIL 이어도 exit 0 이다 — 판정은 hjson.py check 가 백엔드별 결과로 한다.
+# stdout: 첫 줄 판정어(ok|auth|secret|config|network) + 백엔드별 보고. 실패면 고치는 법을 stderr 로 내고 exit 3(문구는 hjson 한 곳).
+rc=0
+report="$(py "$REPO/scripts/hjson.py" check --account "$acct" --doc "$REPO/docs/naver-works-app-password.md")" || rc=$?
+printf '%s\n' "$report" | sed 1d | sed 's/^/    /' >&2
 if [ "$rc" = 0 ]; then
   say "✓ 로그인 확인 완료 — 이제 '$acct' 계정으로 메일을 읽고 보낼 수 있습니다."
   exit 0
 fi
-printf '%s\n' "$out" | sed 's/\x1b\[[0-9;]*m//g' | grep -vE '^\s*$|^Note' | tail -4 | sed 's/^/    /' >&2
-# himalaya 가 비호환 버전(예: 2.x)이면 account doctor 가 네트워크가 아니라 CLI 파싱에서
-# 깨진다(clap: "error: unexpected argument" · "unrecognized subcommand" · "Usage: ..."). 이걸
-# 네트워크 실패로 뭉뚱그리면 엉뚱한 곳(웍스 관리자·방화벽)을 보게 되므로 따로 가려낸다.
-if printf '%s' "$out" | grep -qiE 'usage:|unexpected argument|unrecognized subcommand|wasn.t expected|isn.t expected|invalid (value|subcommand)'; then
-  fail "himalaya 버전/사용법 오류 — 설치된 himalaya 가 1.2.0 과 호환되지 않는 버전일 수 있습니다(2.x 는 비호환)." "'himalaya --version' 으로 1.2.0 인지 확인하고, 아니면 jaix 로 1.2.0 을 다시 설치하세요(jaix setup)." 3
-elif printf '%s' "$out" | grep -qi 'authentication failed'; then
-  fail "로그인 실패 — 아이디 또는 앱 비밀번호가 틀렸습니다." "앱 비밀번호를 새로 발급해 'mailskill setup' 을 다시 실행하세요($REPO/docs/naver-works-app-password.md)." 3
-elif printf '%s' "$out" | grep -qiE 'mail-secret|cannot (run|execute)|not found|password'; then
-  fail "메일 프로그램이 저장된 비밀번호를 읽지 못했습니다." "'mailskill doctor $acct' 로 다시 확인하고, 계속되면 관리자에게 위 내용을 보내세요." 3
-else
-  fail "메일 서버에 접속하지 못했습니다(네트워크 또는 IMAP/SMTP 사용 허용 여부)." "회사망·인터넷 연결을 확인하고, 계속되면 웍스 관리자에게 IMAP/SMTP 허용을 요청하세요." 3
-fi
+exit 3
