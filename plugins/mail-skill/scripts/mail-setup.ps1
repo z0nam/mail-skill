@@ -37,10 +37,24 @@ function Show-Usage {
 }
 # 네이티브 명령 실행. PS 5.1 은 EAP=Stop 에서 stderr 한 줄만 나와도 예외로 승격하므로
 # 이 함수 안에서만 Continue 로 낮추고, 종료 코드는 $LASTEXITCODE 로 직접 본다.
+# PS 5.1 은 네이티브 stderr 를 2>파일 로 받든 2>&1 로 받든 각 줄을 ErrorRecord 로 렌더해
+# "himalaya.exe : Error:" + 위치/CategoryInfo(RemoteException)/NativeCommandError 노이즈를
+# 원문 앞에 붙인다(Windows PS 5.1 실측 — 앞선 2>파일 수정으로는 이 노이즈가 안 걷혔다). 2>&1 로
+# 합친 뒤 ErrorRecord 는 .Exception.Message(=stderr 원문)로, 나머지(=stdout)는 그대로 분리하면
+# 공백 포함 인자(@argv)를 재조립 없이 안전하게 넘기면서도 둘 다 깨끗한 원문으로 얻는다.
 function Invoke-Native([string]$exe, [string[]]$argv) {
     $ErrorActionPreference = 'Continue'
-    $out = & $exe @argv 2>&1 | ForEach-Object { "$_" }
-    return [pscustomobject]@{ Code = $LASTEXITCODE; Text = (@($out) -join "`n") }
+    $merged = & $exe @argv 2>&1
+    $code = $LASTEXITCODE
+    $out = @(); $err = @()
+    foreach ($line in $merged) {
+        if ($line -is [System.Management.Automation.ErrorRecord]) { $err += [string]$line.Exception.Message }
+        else { $out += [string]$line }
+    }
+    $parts = @()
+    if ($out.Count) { $parts += ($out -join "`n") }
+    if ($err.Count) { $parts += ($err -join "`n") }
+    return [pscustomobject]@{ Code = $code; Text = ($parts -join "`n") }
 }
 function Write-Utf8NoBom([string]$path, [string]$text) {
     [System.IO.File]::WriteAllText($path, $text, (New-Object System.Text.UTF8Encoding($false)))
@@ -207,7 +221,13 @@ if ($r.Code -eq 0) {
 }
 $tail = @($r.Text -split "`n" | ForEach-Object { $_ -replace '\x1b\[[0-9;]*m', '' } | Where-Object { $_.Trim() -and $_ -notmatch '^\s*Note' }) | Select-Object -Last 4
 foreach ($l in $tail) { Say "    $l" }
-if ($r.Text -match '(?i)authentication failed') {
+# himalaya 가 비호환 버전(예: 2.x)이면 account doctor 가 네트워크가 아니라 CLI 파싱에서
+# 깨진다(clap: "error: unexpected argument" · "unrecognized subcommand" · "Usage: ..."). 이걸
+# 네트워크 실패로 뭉뚱그리면 엉뚱한 곳(웍스 관리자·방화벽)을 보게 되므로 따로 가려낸다.
+if ($r.Text -match "(?i)usage:|unexpected argument|unrecognized subcommand|wasn.t expected|isn.t expected|invalid (value|subcommand)") {
+    Fail 'himalaya 버전/사용법 오류 — 설치된 himalaya 가 1.2.0 과 호환되지 않는 버전일 수 있습니다(2.x 는 비호환).' "'himalaya --version' 으로 1.2.0 인지 확인하고, 아니면 jaix 로 1.2.0 을 다시 설치하세요(jaix setup)." 3
+}
+elseif ($r.Text -match '(?i)authentication failed') {
     Fail '로그인 실패: 아이디 또는 앱 비밀번호가 틀렸습니다.' "앱 비밀번호를 새로 발급해 'mailskill setup' 을 다시 실행하세요($howto)." 3
 }
 elseif ($r.Text -match '(?i)mail-secret|cannot (run|execute)|not recognized|password') {

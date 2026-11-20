@@ -154,7 +154,12 @@ if [ "$rc" = 0 ]; then
   exit 0
 fi
 printf '%s\n' "$out" | sed 's/\x1b\[[0-9;]*m//g' | grep -vE '^\s*$|^Note' | tail -4 | sed 's/^/    /' >&2
-if printf '%s' "$out" | grep -qi 'authentication failed'; then
+# himalaya 가 비호환 버전(예: 2.x)이면 account doctor 가 네트워크가 아니라 CLI 파싱에서
+# 깨진다(clap: "error: unexpected argument" · "unrecognized subcommand" · "Usage: ..."). 이걸
+# 네트워크 실패로 뭉뚱그리면 엉뚱한 곳(웍스 관리자·방화벽)을 보게 되므로 따로 가려낸다.
+if printf '%s' "$out" | grep -qiE 'usage:|unexpected argument|unrecognized subcommand|wasn.t expected|isn.t expected|invalid (value|subcommand)'; then
+  fail "himalaya 버전/사용법 오류 — 설치된 himalaya 가 1.2.0 과 호환되지 않는 버전일 수 있습니다(2.x 는 비호환)." "'himalaya --version' 으로 1.2.0 인지 확인하고, 아니면 jaix 로 1.2.0 을 다시 설치하세요(jaix setup)." 3
+elif printf '%s' "$out" | grep -qi 'authentication failed'; then
   fail "로그인 실패 — 아이디 또는 앱 비밀번호가 틀렸습니다." "앱 비밀번호를 새로 발급해 'mailskill setup' 을 다시 실행하세요($REPO/docs/naver-works-app-password.md)." 3
 elif printf '%s' "$out" | grep -qiE 'mail-secret|cannot (run|execute)|not found|password'; then
   fail "메일 프로그램이 저장된 비밀번호를 읽지 못했습니다." "'mailskill doctor $acct' 로 다시 확인하고, 계속되면 관리자에게 위 내용을 보내세요." 3

@@ -96,28 +96,37 @@ function Get-PythonExe {
 # 백엔드 stdout 이 JSON 으로 확인된 경우에만 통과. 실패는 stderr + 비정상 종료.
 # himalaya 가 0건에서 "page out of bounds" 로 죽는 케이스는 빈 결과([])로 승격.
 function Invoke-Json([string[]]$BackendArgs) {
-    $errFile = [System.IO.Path]::GetTempFileName()
-    try {
-        $out = & $H @BackendArgs 2>$errFile
-        $rc = $LASTEXITCODE
-        $errText = Get-Content -Raw -LiteralPath $errFile -ErrorAction SilentlyContinue
-        if ($rc -ne 0) {
-            if ($errText -match 'out of bounds') { return '[]' }
-            if ($errText) { [Console]::Error.Write($errText) }
-            Fail "mailskill: backend failed (exit $rc): $($BackendArgs -join ' ')" $rc
-        }
-        if ($env:MAILSKILL_LOG -and $errText) { [Console]::Error.Write($errText) }
-        $text = (@($out) -join "`n")
-        $trimmed = $text.TrimStart()
-        # 첫 글자가 '[' '{' '"' 중 하나여야 JSON. '"' 를 받는 이유: himalaya v1.2.0 의
-        # `message read -o json` 은 메시지 전체를 JSON 문자열 스칼라 하나로 낸다.
-        # 배열·객체만 허용하면 이 멀쩡한 출력이 반려돼 read 가 구조적으로 늘 실패한다.
-        if (-not $trimmed -or ($trimmed[0] -ne '[' -and $trimmed[0] -ne '{' -and $trimmed[0] -ne '"')) {
-            Fail "mailskill: backend produced non-JSON stdout (see stderr above): $($BackendArgs -join ' ')" 1
-        }
-        return $text
+    # PS 5.1 은 네이티브 stderr 를 2>파일/2>&1 어느 쪽으로 받든 각 줄을 ErrorRecord 로 렌더해
+    # "himalaya.exe : Error:" + 위치/CategoryInfo(RemoteException)/NativeCommandError 노이즈를
+    # 붙인다(Windows PS 5.1 실측). 2>&1 로 합친 뒤 ErrorRecord 는 .Exception.Message(원문)로, 나머지는
+    # 네이티브 stdout 으로 분리한다 — stdout(JSON)은 깨끗하게 보존되고(JSON 계약 필수), himalaya 가
+    # 성공 경로에서 stderr 로 내는 진행 메시지("Checking…")도 ErrorRecord 라 JSON 에 안 섞인다.
+    # 파일 EAP=Stop 에서 2>&1 로 stderr 가 흘러오면(예: 0건의 "page out of bounds") PS 5.1 은
+    # 종료 에러로 승격해 $LASTEXITCODE 를 읽기 전에 throw 한다 → 이 함수 안에서만 Continue 로 낮춘다.
+    $ErrorActionPreference = 'Continue'
+    $merged = & $H @BackendArgs 2>&1
+    $rc = $LASTEXITCODE
+    $outLines = @(); $errLines = @()
+    foreach ($line in $merged) {
+        if ($line -is [System.Management.Automation.ErrorRecord]) { $errLines += [string]$line.Exception.Message }
+        else { $outLines += [string]$line }
     }
-    finally { Remove-Item -LiteralPath $errFile -ErrorAction SilentlyContinue }
+    $errText = ($errLines -join "`n")
+    if ($rc -ne 0) {
+        if ($errText -match 'out of bounds') { return '[]' }
+        if ($errText) { [Console]::Error.WriteLine($errText) }
+        Fail "mailskill: backend failed (exit $rc): $($BackendArgs -join ' ')" $rc
+    }
+    if ($env:MAILSKILL_LOG -and $errText) { [Console]::Error.WriteLine($errText) }
+    $text = ($outLines -join "`n")
+    $trimmed = $text.TrimStart()
+    # 첫 글자가 '[' '{' '"' 중 하나여야 JSON. '"' 를 받는 이유: himalaya v1.2.0 의
+    # `message read -o json` 은 메시지 전체를 JSON 문자열 스칼라 하나로 낸다.
+    # 배열·객체만 허용하면 이 멀쩡한 출력이 반려돼 read 가 구조적으로 늘 실패한다.
+    if (-not $trimmed -or ($trimmed[0] -ne '[' -and $trimmed[0] -ne '{' -and $trimmed[0] -ne '"')) {
+        Fail "mailskill: backend produced non-JSON stdout (see stderr above): $($BackendArgs -join ' ')" 1
+    }
+    return $text
 }
 
 # 사용법은 이 파일 맨 위 계약 주석에서 뽑는다 — 두 군데에 적어두면 갈라진다.
@@ -333,7 +342,10 @@ switch ($cmd) {
                 } elseif ($bodyfile -eq '-') {
                     Emit '  (stdin)'
                 } else {
-                    $bLines = Get-Content -LiteralPath $bodyfile -ErrorAction SilentlyContinue | Select-Object -First 60
+                    # -Encoding UTF8: 본문 파일은 보통 BOM 없는 UTF-8 이라, 지정이 없으면
+                    # 한글 Windows 콘솔 기본 인코딩(cp949)으로 읽혀 미리보기가 깨진다.
+                    # (실전송은 compose-mime.py 가 utf-8-sig 로 읽어 정상 — 미리보기 전용 버그.)
+                    $bLines = Get-Content -LiteralPath $bodyfile -Encoding UTF8 -ErrorAction SilentlyContinue | Select-Object -First 60
                     foreach ($l in $bLines) { Emit "  $l" }
                 }
                 if ($dupWarn -eq 3) {
@@ -401,15 +413,20 @@ switch ($cmd) {
         $tmpDir = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), [System.Guid]::NewGuid().ToString())
         [System.IO.Directory]::CreateDirectory($tmpDir) | Out-Null
         $tmpEml = [System.IO.Path]::Combine($tmpDir, 'raw.eml')
-        $errFile = [System.IO.Path]::GetTempFileName()
 
         try {
             $exportArgs = @('message', 'export', $id, '-a', $acct) + $foldArgs + @('--full', '-d', $tmpEml)
-            & $H @exportArgs 2>$errFile
+            # PS 5.1: 네이티브 stderr 를 2>&1 로 합친 뒤 ErrorRecord 는 .Exception.Message(원문)로
+            # 분리한다 — 2>파일 로 받으면 ErrorRecord 렌더 노이즈가 붙는다(Windows PS 5.1 실측). 파일
+            # EAP=Stop 에서 stderr 가 흘러오면 $LASTEXITCODE 전에 throw 하므로 여기서만 Continue.
+            $ErrorActionPreference = 'Continue'
+            $merged = & $H @exportArgs 2>&1
             $rc = $LASTEXITCODE
-            $errText = Get-Content -Raw -LiteralPath $errFile -ErrorAction SilentlyContinue
+            $errText = (@($merged |
+                Where-Object { $_ -is [System.Management.Automation.ErrorRecord] } |
+                ForEach-Object { [string]$_.Exception.Message }) -join "`n")
             if ($rc -ne 0) {
-                if ($errText) { [Console]::Error.Write($errText) }
+                if ($errText) { [Console]::Error.WriteLine($errText) }
                 Fail "mailskill attachment: raw eml 내보내기 실패 (exit $rc)" $rc
             }
 
@@ -420,7 +437,6 @@ switch ($cmd) {
             exit 0
         }
         finally {
-            Remove-Item -LiteralPath $errFile -ErrorAction SilentlyContinue
             Remove-Item -Recurse -Force -LiteralPath $tmpDir -ErrorAction SilentlyContinue
         }
     }
