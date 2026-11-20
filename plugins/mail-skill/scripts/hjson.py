@@ -314,6 +314,46 @@ def envelopes(obj):
     return [envelope(e) for e in _unwrap(obj, "envelopes")]
 
 
+ATT = "--has-attachment"
+ATT_NOTE = ("mailskill: [참고] 서버가 일부 메일의 첨부 정보를 돌려주지 않아, 그 메일은 첨부 여부 없이"
+            "(has_attachment=null) 냅니다.\n")
+_att_noted = False  # 한 번 실행에 안내는 한 번만(search 는 여러 번 묻는다)
+
+
+def fetch_envelopes(args, hbin=None):
+    """envelope list/search 를 돌려 1.x 모양 봉투 목록으로. `--has-attachment` 로 빠진 메일을 되살린다(#41).
+
+    himalaya 2.2.1 은 --has-attachment 를 붙이면 BODYSTRUCTURE 를 따로 받는데, 일부 IMAP 서버
+    (실측: 한 연구기관 메일 서버)의 응답을 해석하지 못하면 그 메일을 경고 없이 결과에서 뺀다("skipping undecodable
+    untagged response"). 옵션 없는 조회는 멀쩡하다. 그래서 결과가 페이지(-s)를 다 채우지 못했으면
+    옵션 없이 한 번 더 받아 비교하고, 그쪽이 더 많으면 그것을 쓴다. 첨부 여부는 첫 조회에 있던
+    메일만 채우고 나머지는 모른다(null). 페이지를 다 채웠으면 빠진 것이 없으므로 추가 조회는 없다.
+    """
+    envs = envelopes(run_json(args, hbin=hbin))
+    head = args[:args.index("--")] if "--" in args else args
+    if ATT not in head:
+        return envs
+    try:
+        size = int(head[head.index("-s") + 1]) if "-s" in head else None
+    except (ValueError, IndexError):
+        size = None
+    if size is not None and len(envs) >= size:
+        return envs
+    i = args.index(ATT)
+    plain = envelopes(run_json(args[:i] + args[i + 1:], hbin=hbin))
+    if len(plain) <= len(envs):
+        return envs
+    known = {e["id"]: e.get("has_attachment") for e in envs if isinstance(e, dict)}
+    for e in plain:
+        if isinstance(e, dict):
+            e["has_attachment"] = known.get(e["id"])
+    global _att_noted
+    if not _att_noted:
+        sys.stderr.write(ATT_NOTE)
+        _att_noted = True
+    return plain
+
+
 def folders(obj):
     out = []
     for m in _unwrap(obj, "mailboxes"):
@@ -488,6 +528,8 @@ def cmd_kind(kind, rest):
             return 2
         if kind in ("read", "raw"):
             data = run(args, json_out=False, raw=True)
+        elif kind == "envelopes":
+            obj = fetch_envelopes(args)  # 이미 1.x 모양 — envelope() 는 그대로 통과시킨다
         else:
             obj = run_json(args)
     elif rest:

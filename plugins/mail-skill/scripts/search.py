@@ -249,7 +249,7 @@ def fetch(sub, base, query, dates, newest_first):
         # 채운다. 날짜만인 질의는 폴더를 훑는 list 라 비용이 커서 채우지 않는다(has_attachment=null).
         att = ["--has-attachment"] if query else []
         args = sub + base + ["-s", str(size)] + att + (["--", render(query)] if query else [])
-        envs = hjson.envelopes(hjson.run_json(args))
+        envs = hjson.fetch_envelopes(args)  # --has-attachment 로 빠진 메일 되살림(#41)
         if len(envs) < size:
             return envs
         if dates and newest_first:
