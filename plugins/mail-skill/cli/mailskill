@@ -46,12 +46,38 @@ while [[ -L "$self" ]]; do
 done
 REPO="$(cd "$(dirname "$self")/.." && pwd)"
 
+# win_args <args...> — Git Bash(MSYS)에서 Windows 용 uv·python 에 넘길 인자를 전역 배열 WA 에 담는다.
+# MSYS 는 보통 /c/... 인자를 C:/... 로 바꿔 주지만 MSYS_NO_PATHCONV=1 인 셸(에이전트가 띄운 Git Bash 등)에선
+# 그대로 넘어가 "Failed to spawn: /c/.../hjson.py (os error 3)" 로 깨진다(jaix-kit#205). 그래서 직접 바꾼다:
+# '/' 로 시작하고 그 경로(또는 '/' 가 아닌 부모 폴더)가 있으면 cygpath -m 으로. 본문·제목·받는 사람 값과
+# '--' 뒤(himalaya 인자·검색어)는 건드리지 않는다. 맥·리눅스에선 그대로 통과.
+WA=()
+win_args() {
+  WA=()
+  local a d skip=0 rest=0
+  for a in "$@"; do
+    if (( _MSYS && !rest && !skip )) && [[ "$a" == /?* ]]; then
+      d="$(dirname -- "$a")"
+      if [[ -e "$a" || ( "$d" != / && -d "$d" ) ]]; then a="$(cygpath -m -- "$a")"; fi
+    fi
+    skip=0
+    case "$a" in
+      --) rest=1 ;;
+      --body|--subject|--to|--cc|--bcc|--reply-folder) skip=1 ;;
+    esac
+    WA+=("$a")
+  done
+}
+_MSYS=0
+case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) command -v cygpath >/dev/null 2>&1 && _MSYS=1 ;; esac
+
 # run_python <script.py|args...>
 # uv 관리 Python 3.12 우선 실행, 없으면 PATH 의 python3/python 으로 폴백.
 # --no-project: 상위/현재 pyproject.toml 탐색 및 불필요한 .venv 생성 차단
 # -q: uv 의 부가 정보 stderr 출력을 억제하여 JSON 스트림 계약 보호
 # --no-python-downloads: 앱 내부 Python 다운로드 방지(TS-RUNTIME-2 및 MSIX 보호)
 run_python() {
+  win_args "$@"; set -- ${WA[@]+"${WA[@]}"}
   if command -v uv >/dev/null 2>&1 && uv python find 3.12 >/dev/null 2>&1; then
     if [[ "${1:-}" == -* ]]; then
       uv run --no-project -q --no-python-downloads --python 3.12 python "$@"
@@ -72,6 +98,7 @@ run_python() {
 # watch 등 상주/오래 도는 프로세스를 위해 현재 셸을 완전히 대체(exec)하여
 # SIGTERM/종료 시그널이 자식 파이썬 프로세스에 정상 전달되도록 함.
 exec_python() {
+  win_args "$@"; set -- ${WA[@]+"${WA[@]}"}
   if command -v uv >/dev/null 2>&1 && uv python find 3.12 >/dev/null 2>&1; then
     if [[ "${1:-}" == -* ]]; then
       exec uv run --no-project -q --no-python-downloads --python 3.12 python "$@"

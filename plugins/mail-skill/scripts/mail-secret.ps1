@@ -5,6 +5,13 @@
 [CmdletBinding()]
 param([Parameter(Mandatory = $true, Position = 0)][string]$Name)
 $ErrorActionPreference = 'Stop'
+# PowerShell 7 창에서 부르면 PS7 의 PSModulePath 가 이 5.1 프로세스에 상속돼, 5.1 이 PS7 판
+# Microsoft.PowerShell.Security·Utility 를 자동 로드하다 CouldNotAutoloadMatchingModule 로 깨진다
+# (ConvertTo-SecureString·ConvertFrom-Json, jaix-kit#205). 5.1 에서는 경로 조각에 'PowerShell'
+# 폴더가 든 항목(PS7 모듈 폴더, WindowsPowerShell 은 해당 없음)을 빼고 시작한다.
+if ($PSVersionTable.PSVersion.Major -lt 6 -and $env:PSModulePath) {
+    $env:PSModulePath = (($env:PSModulePath -split ';') | Where-Object { $_ -and (($_ -split '[\\/]') -notcontains 'PowerShell') }) -join ';'
+}
 # PS 7.4+ 의 네이티브 종료코드→예외 승격을 끈다(age 의 exit code 를 직접 본다). PS 5.1 엔 무해.
 $PSNativeCommandUseErrorActionPreference = $false
 
